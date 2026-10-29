@@ -93,7 +93,7 @@ export function timeAgo(iso: string): string {
   return new Date(iso).toLocaleDateString('ko-KR');
 }
 
-export function download(filename: string, content: string, type: string) {
+export function download(filename: string, content: BlobPart, type: string) {
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');

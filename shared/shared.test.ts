@@ -3,6 +3,7 @@ import { characterStats, el, getScenes, parseHeading, reorderScenes, replaceScen
 import { paginate, wrapText, textWidth, LINES_PER_PAGE } from './pagination';
 import { fromFountain, toFountain } from './fountain';
 import { fromFdx, toFdx } from './fdx';
+import { docxParts, toDocx } from './docx';
 import { diffElements, summarizeDiff } from './diff';
 import { sampleProject } from './sample';
 import type { ScriptElement } from './types';
@@ -130,6 +131,30 @@ describe('fdx', () => {
   it('escapes special characters', () => {
     const xml = toFdx({ title: 'A & B', author: '', contact: '', sceneMeta: {}, elements: [el('action', '<tag> & "q"')] });
     expect(fromFdx(xml).elements[0].text).toBe('<tag> & "q"');
+  });
+});
+
+describe('docx', () => {
+  it('writes styled paragraphs with scene numbers', () => {
+    const p = sampleProject();
+    const doc = docxParts(p)['word/document.xml'];
+    expect(doc).toContain('<w:pStyle w:val="SceneHeading"/>');
+    expect(doc).toContain(p.format === 'korean' ? 'S#1. ' : '<w:tab/>');
+    expect(doc).toContain('마지막 상영');
+    expect(docxParts(p)['word/styles.xml']).toContain('w:styleId="Dialogue"');
+  });
+  it('escapes text and keeps line breaks', () => {
+    const doc = docxParts({ title: 'A & B', author: '', contact: '', format: 'korean', elements: [el('action', '<tag>\n둘째 줄\u0001')] })['word/document.xml'];
+    expect(doc).toContain('A &amp; B');
+    expect(doc).toContain('&lt;tag&gt;</w:t></w:r><w:r><w:br/><w:t xml:space="preserve">둘째 줄</w:t>');
+  });
+  it('packs a valid zip archive', () => {
+    const bytes = toDocx(sampleProject());
+    const view = new DataView(bytes.buffer);
+    expect(view.getUint32(0, true)).toBe(0x04034b50);
+    const end = bytes.length - 22;
+    expect(view.getUint32(end, true)).toBe(0x06054b50);
+    expect(view.getUint16(end + 10, true)).toBe(8);
   });
 });
 

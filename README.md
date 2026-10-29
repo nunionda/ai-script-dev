@@ -49,7 +49,7 @@ ANTHROPIC_API_KEY=sk-ant-... npm run dev
 
 **리포트 · 설정** — 작품 정보, 함께 정한 방향(AI가 지키는 원칙), 인물별 대사·등장 통계와 설정, 장면 목록(쪽·분량 1/8), 장소
 
-**가져오기 / 내보내기** — Final Draft `.fdx`, Fountain `.fountain`, PDF(표지 포함 인쇄용 원고)
+**가져오기 / 내보내기** — Final Draft `.fdx`, Fountain `.fountain`, Word `.docx`(내보내기), PDF(표지 포함 인쇄용 원고)
 
 ## 구조
 

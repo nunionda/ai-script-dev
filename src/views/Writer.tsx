@@ -7,6 +7,7 @@ import { ELEMENT_INFO, getScenes } from '../../shared/screenplay';
 import { paginate } from '../../shared/pagination';
 import { toFountain } from '../../shared/fountain';
 import { toFdx } from '../../shared/fdx';
+import { toDocx } from '../../shared/docx';
 import { api } from '../api';
 import { useProject, usePref } from '../state';
 import { ScriptEditor, type CursorInfo } from '../editor/ScriptEditor';
@@ -97,11 +98,12 @@ export function Writer({ sceneParam }: { sceneParam: string | null }) {
   const currentPage = cursor ? pagination.pageOf.get(cursor.elementId) : undefined;
   const sceneLabel = currentScene ? `${project.format === 'korean' ? 'S#' : '#'}${currentScene.number} ${currentScene.parts.location || ''}`.trim() : '작품 전체';
 
-  const exportAs = async (kind: 'fountain' | 'fdx' | 'pdf') => {
+  const exportAs = async (kind: 'fountain' | 'fdx' | 'docx' | 'pdf') => {
     setExportOpen(false);
     const name = safeFilename(project.title);
     if (kind === 'fountain') download(`${name}.fountain`, toFountain(project), 'text/plain;charset=utf-8');
     if (kind === 'fdx') download(`${name}.fdx`, toFdx(project), 'application/xml;charset=utf-8');
+    if (kind === 'docx') download(`${name}.docx`, toDocx(project), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     if (kind === 'pdf') {
       await flush();
       window.open(projectPath(project.id, 'print'), '_blank', 'noopener');
@@ -162,6 +164,9 @@ export function Writer({ sceneParam }: { sceneParam: string | null }) {
                 </button>
                 <button role="menuitem" onClick={() => void exportAs('fdx')}>
                   Final Draft (.fdx)
+                </button>
+                <button role="menuitem" onClick={() => void exportAs('docx')}>
+                  Word (.docx)
                 </button>
                 <button role="menuitem" onClick={() => void exportAs('fountain')}>
                   Fountain (.fountain)
