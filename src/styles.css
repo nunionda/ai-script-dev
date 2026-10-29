@@ -1,4 +1,20 @@
 /* FRAME — 시나리오 개발 작업실. 디자인 시안(design/writers-room.html)의 토큰을 따른다. */
+.auth-screen { min-height: 100%; display: grid; place-items: center; padding: 32px 20px; }
+.auth-card { width: min(100%, 470px); padding: 36px; border: 1px solid var(--line); background: var(--surface); border-radius: 16px; display: grid; gap: 22px; box-shadow: 0 16px 64px #0000000a; }
+.auth-card h1 { font-size: 24px; }
+.auth-card p, .auth-card small { color: var(--muted); }
+.auth-card form, .auth-card label { display: grid; gap: 10px; }
+.auth-card form { gap: 20px; }
+.auth-card input { width: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+.auth-card .auth-error { color: var(--remove-strong); }
+.account-menu { margin-left: auto; }
+.auth-overlay { position: fixed; inset: 0; z-index: 1000; background: #0007; display: grid; place-items: center; padding: 20px; }
+.auth-team { position: relative; max-height: 90dvh; overflow: auto; width: min(100%, 560px); }
+.auth-close { position: absolute; top: 10px; right: 10px; }
+.auth-team-list { list-style: none; padding: 0; margin: 0; }
+.auth-team-list li { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.auth-team-list small { display: block; }
+@media print { .account-menu { display: none; } }
 :root {
   color-scheme: light dark;
   --bg: light-dark(#f4f4f1, #1d2022);

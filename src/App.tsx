@@ -11,6 +11,7 @@ import { Review } from './views/Review';
 import { Drafts } from './views/Drafts';
 import { Reports } from './views/Reports';
 import { PrintView } from './views/PrintView';
+import { AccountMenu } from './Auth';
 
 const NAV: { view: View; label: string; icon: typeof LayoutGrid }[] = [
   { view: 'board', label: '스토리 구성', icon: PanelsTopLeft },
@@ -65,6 +66,7 @@ function Header({ title, save }: { title?: string; save?: SaveState }) {
         )}
       </div>
       {save && <SaveIndicator state={save} />}
+      <AccountMenu />
     </header>
   );
 }

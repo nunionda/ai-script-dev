@@ -2,15 +2,22 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import { ConflictError, Store } from './db';
 import { AiError, aiStatus, generateProposal, generateSceneCard, streamChat, toAiError } from './ai';
 import type { ChatScope, ProposalStatus } from '../shared/types';
+import { authConfigFromEnv, createAuth, type AuthConfig } from './auth';
 
 type Handler = (req: Request, res: Response) => unknown;
 const wrap = (fn: Handler) => (req: Request, res: Response, next: NextFunction) => Promise.resolve(fn(req, res)).catch(next);
 
 const str = (v: unknown, max = 20000) => (typeof v === 'string' ? v.slice(0, max) : '');
 
-export function createApp(store: Store) {
+export function createApp(store: Store, authConfig: AuthConfig = authConfigFromEnv()) {
   const app = express();
+  app.disable('x-powered-by');
+  // Enable only for a known single reverse proxy, such as Render.
+  if (process.env.FRAME_TRUST_PROXY === '1') app.set('trust proxy', 1);
   app.use(express.json({ limit: '20mb' }));
+  app.use(createAuth(store, authConfig));
+  app.get('/api/auth/me', (_req, res) => res.json({ required: false, user: null }));
+  app.use('/api/auth', (_req, res) => res.status(404).json({ error: '없는 API입니다.' }));
 
   const api = express.Router();
 

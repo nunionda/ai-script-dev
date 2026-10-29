@@ -22,10 +22,12 @@
     "@tiptap/extension-text": "^2.27.3",
     "@tiptap/pm": "^2.27.3",
     "@tiptap/react": "^2.27.3",
+    "cross-env": "^10.1.0",
     "express": "^4.22.3",
     "lucide-react": "^1.55.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "tsx": "^4.23.15",
     "zod": "^4.6.6"
   },
   "devDependencies": {
@@ -35,10 +37,11 @@
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^6.1.2",
     "concurrently": "^10.0.6",
-    "cross-env": "^10.1.0",
-    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.4",
     "vitest": "^5.0.4"
+  },
+  "engines": {
+    "node": "24.x"
   }
 }
