@@ -8,7 +8,12 @@ import type { ChatMessage, ChatScope, Project, ScriptElement } from '../shared/t
 import { ELEMENT_TYPES } from '../shared/types';
 import { ELEMENT_INFO, getScenes, sceneElements, el } from '../shared/screenplay';
 
-export const MODEL = process.env.FRAME_MODEL || 'claude-opus-5-5';
+// FRAME_PROVIDER=ollama 이면 로컬 Ollama 서버로, 아니면 Claude API로 보낸다.
+export const PROVIDER: 'anthropic' | 'ollama' = process.env.FRAME_PROVIDER === 'ollama' ? 'ollama' : 'anthropic';
+export const MODEL = process.env.FRAME_MODEL || (PROVIDER === 'ollama' ? 'gemma4:12b' : 'claude-opus-5-5');
+const OLLAMA_URL = (process.env.OLLAMA_URL || 'http://localhost:11434').replace(/\/+$/, '');
+// Ollama 기본 문맥은 짧아서 원고 전체를 넣으면 앞부분이 잘린다.
+const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX) || 32768;
 
 // 안전 분류기가 요청을 거절하면 서버 측에서 권장 모델로 다시 실행한다.
 const FALLBACK = { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' as const };
@@ -20,13 +25,15 @@ function getClient(): Anthropic {
 }
 
 export function aiStatus() {
-  const configured = Boolean(
-    process.env.ANTHROPIC_API_KEY ||
-      process.env.ANTHROPIC_AUTH_TOKEN ||
-      process.env.ANTHROPIC_PROFILE ||
-      existsSync(join(homedir(), '.config', 'anthropic')),
-  );
-  return { configured, model: MODEL };
+  const configured =
+    PROVIDER === 'ollama' ||
+    Boolean(
+      process.env.ANTHROPIC_API_KEY ||
+        process.env.ANTHROPIC_AUTH_TOKEN ||
+        process.env.ANTHROPIC_PROFILE ||
+        existsSync(join(homedir(), '.config', 'anthropic')),
+    );
+  return { configured, model: MODEL, provider: PROVIDER };
 }
 
 export class AiError extends Error {
@@ -46,11 +53,79 @@ export function toAiError(err: unknown): AiError {
   if (err instanceof Anthropic.BadRequestError) return new AiError(400, `요청이 거부되었습니다: ${err.message}`);
   if (err instanceof Anthropic.APIConnectionError) return new AiError(502, 'Claude API에 연결할 수 없습니다. 네트워크를 확인해 주세요.');
   if (err instanceof Anthropic.APIError) return new AiError(err.status ?? 500, `Claude API 오류: ${err.message}`);
+  if (PROVIDER === 'ollama' && err instanceof TypeError && /fetch failed/i.test(err.message)) {
+    return new AiError(502, `Ollama(${OLLAMA_URL})에 연결할 수 없습니다. Ollama가 실행 중인지 확인해 주세요.`);
+  }
+  if (err instanceof z.ZodError || err instanceof SyntaxError) {
+    return new AiError(502, '모델 응답 형식을 해석하지 못했습니다. 다시 시도해 주세요.');
+  }
   const message = err instanceof Error ? err.message : String(err);
   if (/authentication|api key|apiKey|credentials/i.test(message)) {
     return new AiError(401, 'Claude API 자격 증명이 없습니다. 서버를 실행할 때 ANTHROPIC_API_KEY를 설정해 주세요.');
   }
   return new AiError(500, message);
+}
+
+// ---------------------------------------------------------------- ollama
+
+interface OllamaMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+interface OllamaChunk {
+  message?: { content?: string };
+  done?: boolean;
+  done_reason?: string;
+  error?: string;
+}
+
+async function ollamaRequest(body: Record<string, unknown>, signal?: AbortSignal): Promise<Response> {
+  const res = await fetch(`${OLLAMA_URL}/api/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: MODEL, think: false, options: { num_ctx: OLLAMA_NUM_CTX }, ...body }),
+    signal,
+  });
+  if (res.ok) return res;
+  const detail = await res.text().catch(() => '');
+  if (res.status === 404) throw new AiError(502, `Ollama에 ${MODEL} 모델이 없습니다. "ollama pull ${MODEL}"로 받아 주세요.`);
+  throw new AiError(502, `Ollama 오류 (${res.status}): ${detail.slice(0, 300)}`);
+}
+
+async function ollamaStream(messages: OllamaMessage[], signal: AbortSignal, onText: (delta: string) => void): Promise<string> {
+  const res = await ollamaRequest({ messages, stream: true }, signal);
+  const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = '';
+  let text = '';
+  const handle = (line: string) => {
+    if (!line.trim()) return;
+    const chunk = JSON.parse(line) as OllamaChunk;
+    if (chunk.error) throw new AiError(502, `Ollama 오류: ${chunk.error}`);
+    const delta = chunk.message?.content;
+    if (delta) {
+      text += delta;
+      onText(delta);
+    }
+  };
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += value;
+    const lines = buffer.split('\n');
+    buffer = lines.pop()!;
+    lines.forEach(handle);
+  }
+  handle(buffer);
+  return text;
+}
+
+async function ollamaParse<T extends z.ZodType>(schema: T, messages: OllamaMessage[], signal?: AbortSignal): Promise<z.infer<T>> {
+  const res = await ollamaRequest({ messages, stream: false, format: z.toJSONSchema(schema), options: { num_ctx: OLLAMA_NUM_CTX, temperature: 0.7 } }, signal);
+  const chunk = (await res.json()) as OllamaChunk;
+  if (chunk.error) throw new AiError(502, `Ollama 오류: ${chunk.error}`);
+  if (chunk.done_reason === 'length') throw new AiError(502, '응답이 너무 길어 중간에 잘렸습니다. 요청 범위를 좁혀 주세요.');
+  return schema.parse(JSON.parse(chunk.message?.content ?? ''));
 }
 
 // ---------------------------------------------------------------- context
@@ -148,6 +223,11 @@ export async function streamChat(req: ChatRequest): Promise<string> {
   while (messages.length && messages[0].role !== 'user') messages.shift();
   if (!messages.length || messages[messages.length - 1].role !== 'user') throw new AiError(400, '보낼 메시지가 없습니다.');
 
+  if (PROVIDER === 'ollama') {
+    const system: OllamaMessage = { role: 'system', content: `${PARTNER_INSTRUCTIONS}\n\n${context.join('\n\n')}` };
+    return ollamaStream([system, ...(messages as OllamaMessage[])], req.signal, req.onText);
+  }
+
   const stream = getClient().beta.messages.stream(
     {
       model: MODEL,
@@ -212,29 +292,37 @@ export interface ProposalDraft {
 export async function generateProposal(project: Project, sceneId: string, instruction: string, signal?: AbortSignal): Promise<ProposalDraft> {
   const sc = sceneContext(project, sceneId);
   const original = sceneElements(project.elements, sceneId);
-  const response = await getClient().beta.messages.parse(
-    {
-      model: MODEL,
-      max_tokens: 16000,
-      thinking: { type: 'adaptive' },
-      output_config: { effort: 'high', format: betaZodOutputFormat(ProposalSchema) },
-      system: [
-        { type: 'text', text: REVISION_INSTRUCTIONS },
-        { type: 'text', text: projectBible(project), cache_control: { type: 'ephemeral' } },
+  const userContent = `## 수정할 장면: S#${sc.number}${sc.intent ? `\n장면의 의도: ${sc.intent}` : ''}\n\n${sc.text}\n\n## 작가의 요청\n${instruction.trim() || '장면을 더 날카롭게 다듬어 주세요.'}`;
+  let parsed: z.infer<typeof ProposalSchema> | null;
+  if (PROVIDER === 'ollama') {
+    parsed = await ollamaParse(
+      ProposalSchema,
+      [
+        { role: 'system', content: `${REVISION_INSTRUCTIONS}\n\n${projectBible(project)}` },
+        { role: 'user', content: userContent },
       ],
-      messages: [
-        {
-          role: 'user',
-          content: `## 수정할 장면: S#${sc.number}${sc.intent ? `\n장면의 의도: ${sc.intent}` : ''}\n\n${sc.text}\n\n## 작가의 요청\n${instruction.trim() || '장면을 더 날카롭게 다듬어 주세요.'}`,
-        },
-      ],
-      ...FALLBACK,
-    },
-    { signal },
-  );
-  if (response.stop_reason === 'refusal') throw new AiError(422, '이 장면에 대한 수정안을 만들 수 없다는 응답을 받았습니다.');
-  if (response.stop_reason === 'max_tokens') throw new AiError(502, '수정안이 너무 길어 중간에 잘렸습니다. 요청 범위를 좁혀 주세요.');
-  const parsed = response.parsed_output;
+      signal,
+    );
+  } else {
+    const response = await getClient().beta.messages.parse(
+      {
+        model: MODEL,
+        max_tokens: 16000,
+        thinking: { type: 'adaptive' },
+        output_config: { effort: 'high', format: betaZodOutputFormat(ProposalSchema) },
+        system: [
+          { type: 'text', text: REVISION_INSTRUCTIONS },
+          { type: 'text', text: projectBible(project), cache_control: { type: 'ephemeral' } },
+        ],
+        messages: [{ role: 'user', content: userContent }],
+        ...FALLBACK,
+      },
+      { signal },
+    );
+    if (response.stop_reason === 'refusal') throw new AiError(422, '이 장면에 대한 수정안을 만들 수 없다는 응답을 받았습니다.');
+    if (response.stop_reason === 'max_tokens') throw new AiError(502, '수정안이 너무 길어 중간에 잘렸습니다. 요청 범위를 좁혀 주세요.');
+    parsed = response.parsed_output;
+  }
   if (!parsed) throw new AiError(502, '수정안 형식을 해석하지 못했습니다. 다시 시도해 주세요.');
   const revised = parsed.elements.filter((e) => e.text.trim()).map((e) => el(e.type, e.text.trim()));
   if (!revised.length || revised[0].type !== 'scene') revised.unshift(el('scene', original[0]?.text ?? ''));
@@ -250,16 +338,25 @@ const CardSchema = z.object({
 
 export async function generateSceneCard(project: Project, sceneId: string): Promise<{ synopsis: string; intent: string }> {
   const sc = sceneContext(project, sceneId);
+  const instructions = '당신은 시나리오 개발 작업실의 스토리 에디터입니다. 장면 카드(인덱스 카드)를 작품의 언어로 간결하게 씁니다.';
+  const userContent = `다음 장면의 카드를 써 주세요.\n\n${sc.text}`;
+  if (PROVIDER === 'ollama') {
+    const card = await ollamaParse(CardSchema, [
+      { role: 'system', content: `${instructions}\n\n${projectBible(project)}` },
+      { role: 'user', content: userContent },
+    ]);
+    return { synopsis: card.synopsis.trim(), intent: card.intent.trim() };
+  }
   const response = await getClient().beta.messages.parse({
     model: MODEL,
     max_tokens: 4000,
     thinking: { type: 'adaptive' },
     output_config: { effort: 'low', format: betaZodOutputFormat(CardSchema) },
     system: [
-      { type: 'text', text: '당신은 시나리오 개발 작업실의 스토리 에디터입니다. 장면 카드(인덱스 카드)를 작품의 언어로 간결하게 씁니다.' },
+      { type: 'text', text: instructions },
       { type: 'text', text: projectBible(project), cache_control: { type: 'ephemeral' } },
     ],
-    messages: [{ role: 'user', content: `다음 장면의 카드를 써 주세요.\n\n${sc.text}` }],
+    messages: [{ role: 'user', content: userContent }],
     ...FALLBACK,
   });
   if (response.stop_reason === 'refusal') throw new AiError(422, '이 장면의 요약을 만들 수 없다는 응답을 받았습니다.');

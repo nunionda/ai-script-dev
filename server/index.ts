@@ -1,3 +1,4 @@
+import './env';
 import express from 'express';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -22,7 +23,7 @@ if (process.env.NODE_ENV === 'production' && existsSync(dist)) {
 const server = app.listen(port, '0.0.0.0', () => {
   const ai = aiStatus();
   console.log(`FRAME API  http://localhost:${port}`);
-  console.log(ai.configured ? `AI 개발 파트너: ${ai.model}` : 'AI 개발 파트너: 자격 증명 없음 (ANTHROPIC_API_KEY를 설정하면 활성화됩니다)');
+  console.log(ai.configured ? `AI 개발 파트너: ${ai.model} (${ai.provider})` : 'AI 개발 파트너: 자격 증명 없음 (ANTHROPIC_API_KEY를 설정하면 활성화됩니다)');
 });
 
 // Let in-flight saves finish before the hosting platform replaces this process.
