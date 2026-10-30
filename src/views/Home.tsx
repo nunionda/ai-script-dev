@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { FileUp, Plus, Trash2 } from 'lucide-react';
-import type { ProjectSummary, Proposal, Project, ScriptFormat } from '../../shared/types';
+import type { ProjectSummary, Proposal, Project, ReferenceDocument, ScriptFormat } from '../../shared/types';
 import { api, type ProjectPatch } from '../api';
 import { Modal, go, projectPath, timeAgo, useAnnounce } from '../ui';
 import { blankProject } from '../../shared/sample';
 import { fromFountain } from '../../shared/fountain';
 import { fromFdx } from '../../shared/fdx';
+import { fromParagraphs, fromText, importBinary, importKind, type ImportResult } from '../../shared/importers';
 import { uid } from '../../shared/screenplay';
 import { loadMe } from '../state';
 
@@ -146,11 +147,12 @@ function NewProject({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const create = async (data: ProjectPatch) => {
+  const create = async (data: ProjectPatch, doc?: Pick<ReferenceDocument, 'kind' | 'title' | 'content'>) => {
     setBusy(true);
     setError('');
     try {
       const p = await api.createProject(data);
+      if (doc) await api.createDocument(p.id, doc).catch(() => undefined);
       go(projectPath(p.id));
     } catch (e) {
       setError(e instanceof Error ? e.message : '만들지 못했습니다.');
@@ -159,17 +161,31 @@ function NewProject({ onClose }: { onClose: () => void }) {
   };
 
   const importFile = async (file: File) => {
-    const text = await file.text();
-    const isFdx = /\.fdx$/i.test(file.name) || text.trimStart().startsWith('<?xml');
-    let parsed;
+    const data = new Uint8Array(await file.arrayBuffer());
+    const kind = importKind(file.name, data.subarray(0, 8));
+    let parsed: ImportResult;
+    setBusy(true);
+    setError('');
     try {
-      parsed = isFdx ? fromFdx(text) : fromFountain(text);
-    } catch {
-      setError('파일을 해석하지 못했습니다.');
+      if (kind === 'docx' || kind === 'hwpx' || kind === 'hwp') parsed = await importBinary(kind, data);
+      else if (kind === 'pdf') {
+        // PDF 읽기(pdf.js)는 크므로 PDF를 열 때만 불러온다
+        const { pdfParagraphs } = await import('../pdfImport');
+        parsed = fromParagraphs(await pdfParagraphs(data));
+      } else {
+        const text = new TextDecoder().decode(data);
+        if (kind === 'fdx' || (!kind && text.trimStart().startsWith('<?xml'))) parsed = { ...fromFdx(text), preface: '' };
+        else if (kind === 'fountain') parsed = { ...fromFountain(text), preface: '' };
+        else parsed = fromText(text);
+      }
+    } catch (e) {
+      setError(e instanceof Error && /[가-힣]/.test(e.message) ? e.message : '파일을 해석하지 못했습니다.');
+      setBusy(false);
       return;
     }
+    setBusy(false);
     if (!parsed.elements.length) {
-      setError('가져올 원고 내용이 없습니다.');
+      setError('가져올 원고 내용이 없습니다. 장면 제목(S#1. / INT.) 줄이 있는지 확인해 주세요.');
       return;
     }
     const acts = parsed.acts.length ? parsed.acts : [{ id: uid('a'), title: '1막' }, { id: uid('a'), title: '2막' }, { id: uid('a'), title: '3막' }];
@@ -177,8 +193,9 @@ function NewProject({ onClose }: { onClose: () => void }) {
     const first = parsed.elements.find((e) => e.type === 'scene');
     if (first && !sceneMeta[first.id]?.act) sceneMeta[first.id] = { ...sceneMeta[first.id], act: acts[0].id };
     const hasHangul = parsed.elements.some((e) => /[가-힣]/.test(e.text));
-    await create({
-      title: parsed.title || title || file.name.replace(/\.[^.]+$/, ''),
+    await create(
+      {
+      title: title || parsed.title || file.name.replace(/\.[^.]+$/, ''),
       author: parsed.author,
       contact: parsed.contact,
       format: hasHangul ? 'korean' : 'hollywood',
@@ -186,7 +203,10 @@ function NewProject({ onClose }: { onClose: () => void }) {
       elements: parsed.elements,
       acts,
       sceneMeta,
-    });
+      },
+      // 첫 장면 앞의 기획의도·줄거리 등은 참고 문서로 남긴다
+      parsed.preface.trim() ? { kind: 'other', title: `${file.name} — 원고 앞부분`, content: parsed.preface } : undefined,
+    );
   };
 
   return (
@@ -217,7 +237,7 @@ function NewProject({ onClose }: { onClose: () => void }) {
         <div className="row">
           <button type="button" onClick={() => fileRef.current?.click()} disabled={busy}>
             <FileUp aria-hidden="true" />
-            파일 가져오기 (.fdx, .fountain)
+            파일 가져오기
           </button>
           <button className="primary" type="submit" disabled={busy}>
             {busy ? '만드는 중…' : '빈 원고로 시작'}
@@ -226,7 +246,7 @@ function NewProject({ onClose }: { onClose: () => void }) {
         <input
           ref={fileRef}
           type="file"
-          accept=".fdx,.fountain,.spmd,.txt"
+          accept=".fdx,.fountain,.spmd,.txt,.docx,.hwp,.hwpx,.pdf"
           hidden
           onChange={(e) => {
             const f = e.target.files?.[0];
