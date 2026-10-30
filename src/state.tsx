@@ -22,7 +22,18 @@ export function useProject(): ProjectContextValue {
   return ctx;
 }
 
-const FIELDS = ['title', 'logline', 'genre', 'author', 'contact', 'format', 'status', 'elements', 'acts', 'sceneMeta', 'characters', 'decisions', 'openQuestions'] as const;
+const FIELDS = ['title', 'logline', 'genre', 'author', 'contact', 'format', 'status', 'elements', 'acts', 'sceneMeta', 'characters',
+  'rulings',
+  'oneAction',
+  'hardRules',
+  'bannedWords',
+  'tagCategories',
+  'elementMarks',
+  'auditOptions',
+  'numberingLocked',
+  'openQuestions',
+  'translation',
+] as const;
 
 function dataOf(p: Project): ProjectPatch {
   const out: Record<string, unknown> = {};

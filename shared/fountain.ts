@@ -186,3 +186,17 @@ export function fromFountain(source: string): ImportedScript {
   }
   return result;
 }
+
+/**
+ * 모델이 장면 전체를 요소 하나에 시나리오 텍스트로 몰아 쓰는 경우가 있다.
+ * 빈 줄로 나뉜 여러 문단이 든 요소는 Fountain 규칙으로 다시 나눈다. 첫 조각은 원래 요소 종류를 지킨다.
+ */
+export function expandRuns<T extends { type: ElementType; text: string }>(elements: T[]): { type: ElementType; text: string }[] {
+  return elements.flatMap((e) => {
+    if (!/\n\s*\n/.test(e.text)) return [{ type: e.type, text: e.text }];
+    const parts = fromFountain(e.text).elements.map((x) => ({ type: x.type, text: x.text }));
+    if (!parts.length) return [{ type: e.type, text: e.text }];
+    if (e.type === 'scene' && parts[0].type !== 'scene') parts[0] = { ...parts[0], type: 'scene' };
+    return parts;
+  });
+}

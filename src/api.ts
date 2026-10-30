@@ -1,14 +1,32 @@
 import type {
   ChatMessage,
   ChatScope,
+  ChatSummary,
   Project,
   ProjectSummary,
   Proposal,
   ProposalStatus,
+  ReferenceDocument,
+  ReviewRole,
   SceneComment,
+  SceneMeta,
   Snapshot,
   SnapshotSummary,
+  StructureAudit,
+  TranslationLoss,
+  ScriptElement,
 } from '../shared/types';
+
+export interface SceneTranslation {
+  elements: ScriptElement[];
+  losses: TranslationLoss[];
+  names: Record<string, string>;
+  sourceHash: string;
+  label: string;
+  act: string;
+}
+
+export type GeneratedCard = Required<Pick<SceneMeta, 'synopsis' | 'intent' | 'pov' | 'goal' | 'obstacle' | 'outcome' | 'valueStart' | 'valueEnd' | 'turnBy' | 'link'>>;
 
 export class ApiError extends Error {
   constructor(
@@ -68,6 +86,16 @@ export const api = {
   createProposal: (id: string, sceneId: string, instruction: string) => request<Proposal>('POST', `/projects/${id}/proposals`, { sceneId, instruction }),
   setProposalStatus: (pid: string, status: ProposalStatus) => request<Proposal>('PATCH', `/proposals/${pid}`, { status }),
   deleteProposal: (pid: string) => request<void>('DELETE', `/proposals/${pid}`),
+  reviewProposal: (pid: string, role: ReviewRole) => request<Proposal>('POST', `/proposals/${pid}/reviews`, { role }),
+
+  listTranslations: (id: string) => request<ProjectSummary[]>('GET', `/projects/${id}/translations`),
+  createTranslation: (id: string) => request<Project>('POST', `/projects/${id}/translations`),
+  translateScene: (id: string, sourceSceneId: string, names: Record<string, string>) =>
+    request<SceneTranslation>('POST', `/projects/${id}/translate-scene`, { sourceSceneId, names }),
+
+  getStructureAudit: (id: string) => request<StructureAudit | null>('GET', `/projects/${id}/audit/structure`),
+  runStructureAudit: (id: string) => request<StructureAudit>('POST', `/projects/${id}/audit/structure`),
+  summarizeChat: (id: string, sceneId: string) => request<ChatSummary>('POST', `/projects/${id}/chat/summary`, { sceneId }),
 
   listComments: (id: string) => request<SceneComment[]>('GET', `/projects/${id}/comments`),
   addComment: (id: string, c: { sceneId: string; author: string; role: string; text: string }) => request<SceneComment>('POST', `/projects/${id}/comments`, c),
@@ -76,7 +104,12 @@ export const api = {
 
   listChat: (id: string, sceneId: string) => request<ChatMessage[]>('GET', `/projects/${id}/chat?sceneId=${encodeURIComponent(sceneId)}`),
   clearChat: (id: string, sceneId: string) => request<void>('DELETE', `/projects/${id}/chat?sceneId=${encodeURIComponent(sceneId)}`),
-  sceneCard: (id: string, sceneId: string) => request<{ synopsis: string; intent: string }>('POST', `/projects/${id}/scene-card`, { sceneId }),
+  sceneCard: (id: string, sceneId: string) => request<GeneratedCard>('POST', `/projects/${id}/scene-card`, { sceneId }),
+
+  listDocuments: (id: string) => request<ReferenceDocument[]>('GET', `/projects/${id}/documents`),
+  createDocument: (id: string, d: Pick<ReferenceDocument, 'kind' | 'title' | 'content'>) => request<ReferenceDocument>('POST', `/projects/${id}/documents`, d),
+  updateDocument: (did: string, d: Partial<Pick<ReferenceDocument, 'kind' | 'title' | 'content'>>) => request<ReferenceDocument>('PUT', `/documents/${did}`, d),
+  deleteDocument: (did: string) => request<void>('DELETE', `/documents/${did}`),
 };
 
 export interface ChatHandlers {

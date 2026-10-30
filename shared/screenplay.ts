@@ -118,7 +118,10 @@ function normalizePlace(p: string): string {
 
 export interface SceneInfo {
   id: string;
+  /** 원고상 순서 (1부터) */
   number: number;
+  /** 표시용 장면 번호. 번호를 고정하면 "41-1"처럼 끼워 넣은 번호가 된다. */
+  label: string;
   heading: string;
   parts: HeadingParts;
   /** elements 배열에서 씬 헤딩의 인덱스 */
@@ -130,9 +133,74 @@ export interface SceneInfo {
   characters: string[];
 }
 
+type SceneSource = Pick<Project, 'elements' | 'acts' | 'sceneMeta'> & Partial<Pick<Project, 'numberingLocked' | 'format'>>;
+
+/**
+ * 장면 번호. 고정하지 않으면 1..n.
+ * 고정하면 저장된 번호를 쓰고, 번호 없는 새 장면은 앞 장면 뒤에 끼운다 (한국식 41-1, 할리우드식 41A).
+ */
+export function sceneLabels(project: SceneSource): Map<string, string> {
+  const ids = project.elements.filter((e) => e.type === 'scene').map((e) => e.id);
+  const out = new Map<string, string>();
+  if (!project.numberingLocked) {
+    ids.forEach((id, i) => out.set(id, String(i + 1)));
+    return out;
+  }
+  const korean = project.format !== 'hollywood';
+  let base = '0';
+  let inserted = 0;
+  for (const id of ids) {
+    const fixed = project.sceneMeta[id]?.label?.trim();
+    if (fixed) {
+      out.set(id, fixed);
+      base = fixed;
+      inserted = 0;
+      continue;
+    }
+    inserted++;
+    out.set(id, korean ? `${base}-${inserted}` : `${base}${String.fromCharCode(64 + Math.min(inserted, 26))}`);
+  }
+  return out;
+}
+
+/** 지금 보이는 번호를 그대로 고정한다. */
+export function lockSceneNumbers(project: SceneSource): Record<string, SceneMeta> {
+  const labels = sceneLabels({ ...project, numberingLocked: false });
+  const sceneMeta = { ...project.sceneMeta };
+  for (const [id, label] of labels) sceneMeta[id] = { ...sceneMeta[id], label };
+  return sceneMeta;
+}
+
+/** 고정을 풀면 번호를 다시 매긴다. */
+export function unlockSceneNumbers(project: SceneSource): Record<string, SceneMeta> {
+  const sceneMeta: Record<string, SceneMeta> = {};
+  for (const [id, m] of Object.entries(project.sceneMeta)) {
+    const { label: _label, ...rest } = m;
+    sceneMeta[id] = rest;
+  }
+  return sceneMeta;
+}
+
+/**
+ * 출력용 원고: 삭제 장면은 번호와 "삭제"(OMITTED)만 남기고 본문을 뺀다.
+ * 씬 헤딩 id는 그대로라 sceneLabels()의 번호를 쓸 수 있다.
+ */
+export function printableElements(project: SceneSource): ScriptElement[] {
+  const out: ScriptElement[] = [];
+  let skipping = false;
+  for (const e of project.elements) {
+    if (e.type === 'scene') {
+      skipping = Boolean(project.sceneMeta[e.id]?.omitted);
+      out.push(skipping ? { ...e, text: project.format === 'hollywood' ? 'OMITTED' : '삭제' } : e);
+    } else if (!skipping) out.push(e);
+  }
+  return out;
+}
+
 /** 원고에서 장면 목록을 만든다. 첫 씬 헤딩 이전의 요소는 장면에 포함되지 않는다. */
-export function getScenes(project: Pick<Project, 'elements' | 'acts' | 'sceneMeta'>): SceneInfo[] {
+export function getScenes(project: SceneSource): SceneInfo[] {
   const { elements, acts, sceneMeta } = project;
+  const labels = sceneLabels(project);
   const scenes: SceneInfo[] = [];
   let currentAct = acts[0]?.id ?? '';
   const actIds = new Set(acts.map((a) => a.id));
@@ -145,6 +213,7 @@ export function getScenes(project: Pick<Project, 'elements' | 'acts' | 'sceneMet
     scenes.push({
       id: e.id,
       number: scenes.length + 1,
+      label: labels.get(e.id) ?? String(scenes.length + 1),
       heading: e.text,
       parts: parseHeading(e.text),
       start: i,
@@ -195,6 +264,21 @@ export function replaceScene(elements: ScriptElement[], sceneId: string, replace
   while (end < elements.length && elements[end].type !== 'scene') end++;
   const next = replacement.map((e, i) => (i === 0 && e.type === 'scene' ? { ...e, id: sceneId } : e));
   return [...elements.slice(0, start), ...next, ...elements.slice(end)];
+}
+
+/**
+ * 수정안 요소가 원문과 종류·문장이 같으면 원문의 id를 이어받는다.
+ * 그래야 【확정】·태그 같은 요소 표시가 채택 뒤에도 남는다.
+ */
+export function carryIds(original: ScriptElement[], revised: ScriptElement[]): ScriptElement[] {
+  // 요소 종류에는 '|'가 없으므로 키가 겹치지 않는다
+  const key = (e: ScriptElement) => `${e.type}|${e.text.trim()}`;
+  const pool = new Map<string, string[]>();
+  for (const e of original) pool.set(key(e), [...(pool.get(key(e)) ?? []), e.id]);
+  return revised.map((e) => {
+    const id = pool.get(key(e))?.shift();
+    return id ? { ...e, id } : e;
+  });
 }
 
 /**

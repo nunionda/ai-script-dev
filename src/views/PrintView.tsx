@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { Printer } from 'lucide-react';
 import { useProject } from '../state';
 import { ScriptView } from '../components/ScriptView';
+import { printableElements, sceneLabels } from '../../shared/screenplay';
 
 /** 인쇄 · PDF 저장용 원고. 표지 + 표준 서식 본문. */
 export function PrintView() {
@@ -36,7 +37,7 @@ export function PrintView() {
         {project.contact && <p className="contact">{project.contact}</p>}
       </section>
       <section className="print-body">
-        <ScriptView elements={project.elements} format={project.format} />
+        <ScriptView elements={printableElements(project)} format={project.format} labels={sceneLabels(project)} />
       </section>
     </div>
   );

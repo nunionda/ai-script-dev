@@ -8,12 +8,14 @@ import { paginate } from '../../shared/pagination';
 import { toFountain } from '../../shared/fountain';
 import { toFdx } from '../../shared/fdx';
 import { toDocx } from '../../shared/docx';
+import { toHwpx } from '../../shared/hwpx';
 import { api } from '../api';
 import { useProject, usePref } from '../state';
 import { ScriptEditor, type CursorInfo } from '../editor/ScriptEditor';
 import { focusElement, setElementType } from '../editor/extensions';
 import { SceneNav } from '../components/SceneNav';
 import { AiPanel } from '../components/AiPanel';
+import { MarkBar } from '../components/MarkBar';
 import { Modal, download, projectPath, safeFilename, useAnnounce } from '../ui';
 
 export function Writer({ sceneParam }: { sceneParam: string | null }) {
@@ -43,7 +45,19 @@ export function Writer({ sceneParam }: { sceneParam: string | null }) {
       .catch(() => setAiConfigured(null));
   }, [project.id, loadComments]);
 
-  const scenes = useMemo(() => getScenes(project), [project.elements, project.acts, project.sceneMeta]);
+  const scenes = useMemo(
+    () => getScenes(project),
+    [project.elements, project.acts, project.sceneMeta, project.numberingLocked, project.format],
+  );
+  const layout = useMemo(
+    () => ({
+      sceneMeta: project.sceneMeta,
+      numberingLocked: project.numberingLocked,
+      marks: project.elementMarks,
+      tagNames: new Map(project.tagCategories.map((c) => [c.id, c.name])),
+    }),
+    [project.sceneMeta, project.numberingLocked, project.elementMarks, project.tagCategories],
+  );
   const pagination = useMemo(() => paginate(project.elements), [project.elements]);
   const currentScene = scenes.find((s) => s.id === cursor?.sceneId) ?? null;
 
@@ -63,6 +77,19 @@ export function Writer({ sceneParam }: { sceneParam: string | null }) {
   }, [proposals, comments]);
 
   const onChange = useCallback((elements: ScriptElement[]) => update({ elements }), [update]);
+  const onUnlock = useCallback(
+    (ids: string[]) =>
+      update((p) => {
+        const elementMarks = { ...p.elementMarks };
+        for (const id of ids) {
+          const { locked: _locked, ...rest } = elementMarks[id] ?? {};
+          if (rest.play || rest.tags?.length) elementMarks[id] = rest;
+          else delete elementMarks[id];
+        }
+        return { elementMarks };
+      }),
+    [update],
+  );
   const onCursor = useCallback((info: CursorInfo) => {
     setCursor((prev) => (prev && prev.sceneId === info.sceneId && prev.type === info.type && prev.elementId === info.elementId ? prev : info));
   }, []);
@@ -96,14 +123,15 @@ export function Writer({ sceneParam }: { sceneParam: string | null }) {
 
   const extraCharacters = useMemo(() => Object.keys(project.characters), [project.characters]);
   const currentPage = cursor ? pagination.pageOf.get(cursor.elementId) : undefined;
-  const sceneLabel = currentScene ? `${project.format === 'korean' ? 'S#' : '#'}${currentScene.number} ${currentScene.parts.location || ''}`.trim() : '작품 전체';
+  const sceneLabel = currentScene ? `${project.format === 'korean' ? 'S#' : '#'}${currentScene.label} ${currentScene.parts.location || ''}`.trim() : '작품 전체';
 
-  const exportAs = async (kind: 'fountain' | 'fdx' | 'docx' | 'pdf') => {
+  const exportAs = async (kind: 'fountain' | 'fdx' | 'docx' | 'hwpx' | 'pdf') => {
     setExportOpen(false);
     const name = safeFilename(project.title);
     if (kind === 'fountain') download(`${name}.fountain`, toFountain(project), 'text/plain;charset=utf-8');
     if (kind === 'fdx') download(`${name}.fdx`, toFdx(project), 'application/xml;charset=utf-8');
     if (kind === 'docx') download(`${name}.docx`, toDocx(project), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    if (kind === 'hwpx') download(`${name}.hwpx`, toHwpx(project), 'application/hwp+zip');
     if (kind === 'pdf') {
       await flush();
       window.open(projectPath(project.id, 'print'), '_blank', 'noopener');
@@ -168,6 +196,9 @@ export function Writer({ sceneParam }: { sceneParam: string | null }) {
                 <button role="menuitem" onClick={() => void exportAs('docx')}>
                   Word (.docx)
                 </button>
+                <button role="menuitem" onClick={() => void exportAs('hwpx')}>
+                  한글 (.hwpx)
+                </button>
                 <button role="menuitem" onClick={() => void exportAs('fountain')}>
                   Fountain (.fountain)
                 </button>
@@ -200,9 +231,11 @@ export function Writer({ sceneParam }: { sceneParam: string | null }) {
         <section className="manuscript" aria-label="원고">
           <div className="paper-tools">
             <span>시나리오 · {project.format === 'korean' ? '한국식 서식' : '할리우드 서식'}</span>
-            <span>
-              {cursor ? ELEMENT_INFO[cursor.type].label : ''} · Enter 다음 요소 · Tab 요소 바꾸기
-            </span>
+            {cursor?.elementId ? (
+              <MarkBar elementId={cursor.elementId} />
+            ) : (
+              <span>Enter 다음 요소 · Tab 요소 바꾸기</span>
+            )}
           </div>
           <article className={`paper paper-${paper} format-${project.format}`}>
             <div className="page-number">
@@ -211,9 +244,11 @@ export function Writer({ sceneParam }: { sceneParam: string | null }) {
             <ScriptEditor
               initial={project.elements}
               format={project.format}
+              layout={layout}
               extraCharacters={extraCharacters}
               onChange={onChange}
               onCursor={onCursor}
+              onUnlock={onUnlock}
               onReady={setEditor}
             />
             <div className="paper-end" aria-hidden="true">

@@ -3,8 +3,9 @@ import Document from '@tiptap/extension-document';
 import { Plugin, PluginKey, TextSelection, type EditorState, type Transaction } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import type { Node as PMNode } from '@tiptap/pm/model';
-import type { ElementType, ScriptElement, ScriptFormat } from '../../shared/types';
-import { ELEMENT_INFO, EMPTY_ENTER, ENTER_NEXT, SHIFT_TAB_NEXT, TAB_NEXT, uid } from '../../shared/screenplay';
+import type { ElementMark, ElementType, SceneMeta, ScriptElement, ScriptFormat } from '../../shared/types';
+import { ELEMENT_INFO, EMPTY_ENTER, ENTER_NEXT, SHIFT_TAB_NEXT, TAB_NEXT, sceneLabels, uid } from '../../shared/screenplay';
+import { STAGE_LABEL } from '../../shared/audit';
 import { paginate } from '../../shared/pagination';
 
 export const ScriptDocument = Document.extend({ content: 'element+' });
@@ -206,15 +207,37 @@ export const UniqueIds = Extension.create({
 
 export const layoutKey = new PluginKey<DecorationSet>('screenplayLayout');
 
-export interface LayoutOptions {
-  getFormat: () => ScriptFormat;
+/** 장면 번호·요소 표시를 그리는 데 필요한 작품 정보 */
+export interface LayoutContext {
+  format: ScriptFormat;
+  sceneMeta: Record<string, SceneMeta>;
+  numberingLocked: boolean;
+  marks: Record<string, ElementMark>;
+  /** 태그 분류 id → 이름 */
+  tagNames: Map<string, string>;
 }
 
-function buildDecorations(doc: PMNode, format: ScriptFormat): DecorationSet {
+export interface LayoutOptions {
+  getContext: () => LayoutContext;
+}
+
+function markLabel(mark: ElementMark | undefined, tagNames: Map<string, string>): string {
+  if (!mark) return '';
+  return [
+    mark.locked ? '확정' : '',
+    mark.play ? '극중극' : '',
+    ...(mark.tags ?? []).map((t) => `${tagNames.get(t.cat) ?? '?'}${t.stage ? `·${STAGE_LABEL[t.stage]}` : ''}`),
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+function buildDecorations(doc: PMNode, ctx: LayoutContext): DecorationSet {
+  const { format } = ctx;
   const elements = docToElements(doc);
+  const labels = sceneLabels({ elements, acts: [], sceneMeta: ctx.sceneMeta, numberingLocked: ctx.numberingLocked, format });
   const { breaks } = paginate(elements);
   const decos: Decoration[] = [];
-  let sceneNo = 0;
   doc.forEach((node, offset) => {
     const id = node.attrs.id as string;
     const page = id ? breaks.get(id) : undefined;
@@ -235,10 +258,18 @@ function buildDecorations(doc: PMNode, format: ScriptFormat): DecorationSet {
         ),
       );
     }
+    const attrs: Record<string, string> = {};
     if (node.attrs.type === 'scene') {
-      sceneNo++;
-      decos.push(Decoration.node(offset, offset + node.nodeSize, { 'data-scene-number': format === 'korean' ? `S#${sceneNo}.` : String(sceneNo) }));
+      const label = labels.get(id) ?? '';
+      attrs['data-scene-number'] = format === 'korean' ? `S#${label}.` : label;
+      if (ctx.sceneMeta[id]?.omitted) attrs.class = 'is-omitted';
     }
+    const mark = markLabel(ctx.marks[id], ctx.tagNames);
+    if (mark) {
+      attrs['data-mark'] = mark;
+      attrs.class = `${attrs.class ?? ''} has-mark${ctx.marks[id]?.locked ? ' is-locked' : ''}`.trim();
+    }
+    if (Object.keys(attrs).length) decos.push(Decoration.node(offset, offset + node.nodeSize, attrs));
   });
   return DecorationSet.create(doc, decos);
 }
@@ -246,16 +277,18 @@ function buildDecorations(doc: PMNode, format: ScriptFormat): DecorationSet {
 export const ScreenplayLayout = Extension.create<LayoutOptions>({
   name: 'screenplayLayout',
   addOptions() {
-    return { getFormat: () => 'korean' as ScriptFormat };
+    return {
+      getContext: (): LayoutContext => ({ format: 'korean', sceneMeta: {}, numberingLocked: false, marks: {}, tagNames: new Map() }),
+    };
   },
   addProseMirrorPlugins() {
-    const getFormat = this.options.getFormat;
+    const getContext = this.options.getContext;
     return [
       new Plugin<DecorationSet>({
         key: layoutKey,
         state: {
-          init: (_, state) => buildDecorations(state.doc, getFormat()),
-          apply: (tr, old) => (tr.docChanged || tr.getMeta(layoutKey) ? buildDecorations(tr.doc, getFormat()) : old),
+          init: (_, state) => buildDecorations(state.doc, getContext()),
+          apply: (tr, old) => (tr.docChanged || tr.getMeta(layoutKey) ? buildDecorations(tr.doc, getContext()) : old),
         },
         props: {
           decorations: (state) => layoutKey.getState(state),
@@ -279,3 +312,62 @@ export function focusElement(editor: Editor, id: string, block: ScrollLogicalPos
   const dom = editor.view.nodeDOM(target);
   if (dom instanceof HTMLElement) dom.scrollIntoView({ block, behavior: 'smooth' });
 }
+
+// ---------------------------------------------------------------- 【확정】 요소 편집 확인
+
+export interface LockGuardOptions {
+  isLocked: (id: string) => boolean;
+  /** 작가가 확정을 풀고 편집하기로 했을 때 */
+  onUnlock: (ids: string[]) => void;
+}
+
+/** 확정 요소의 문장·종류가 바뀌거나 지워지는 편집은 확인을 받고, 승인하면 확정을 푼다. */
+export const LockGuard = Extension.create<LockGuardOptions>({
+  name: 'lockGuard',
+  addOptions() {
+    return { isLocked: () => false, onUnlock: () => undefined };
+  },
+  addProseMirrorPlugins() {
+    const { isLocked, onUnlock } = this.options;
+    const editor = this.editor;
+    // React 상태가 갱신되기 전 다음 입력에서 다시 묻지 않도록
+    const released = new Set<string>();
+    const declined = new Map<string, number>();
+    return [
+      new Plugin({
+        filterTransaction: (tr, state) => {
+          if (!tr.docChanged) return true;
+          // 확정이 실제로 풀린 요소는 목록에서 뺀다 — 다시 확정하면 다시 묻는다
+          for (const id of released) if (!isLocked(id)) released.delete(id);
+          const before = new Map<string, string>();
+          state.doc.forEach((n) => {
+            const id = n.attrs.id as string;
+            if (id && isLocked(id) && !released.has(id)) before.set(id, `${n.attrs.type}|${n.textContent}`);
+          });
+          if (!before.size) return true;
+          const after = new Map<string, string>();
+          tr.doc.forEach((n) => {
+            const id = n.attrs.id as string;
+            if (before.has(id)) after.set(id, `${n.attrs.type}|${n.textContent}`);
+          });
+          const changed = [...before].filter(([id, v]) => after.get(id) !== v).map(([id]) => id);
+          if (!changed.length) return true;
+          // 거절한 직후의 이어지는 입력(한글 조합 중 ㅎ→하→확정 등)은 다시 묻지 않고 막는다
+          const now = Date.now();
+          const recentlyDeclined = changed.every((id) => now - (declined.get(id) ?? 0) < 1500);
+          if (!recentlyDeclined && confirm(`작가 확정 표현 ${changed.length}곳을 고칩니다. 확정을 풀고 편집할까요?`)) {
+            changed.forEach((id) => released.add(id));
+            onUnlock(changed);
+            return true;
+          }
+          changed.forEach((id) => declined.set(id, Date.now()));
+          // 입력이 이미 화면(DOM)에 반영된 경우 상태대로 다시 그린다
+          setTimeout(() => {
+            if (!editor.isDestroyed) editor.view.dispatch(editor.state.tr.setMeta(layoutKey, true));
+          });
+          return false;
+        },
+      }),
+    ];
+  },
+});

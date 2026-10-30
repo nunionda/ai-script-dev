@@ -1444,6 +1444,314 @@ p.banner {
   flex: 1;
 }
 
+/* ---------------------------------------------------------------- bible · audit · marks */
+.paper .el.has-mark {
+  box-shadow: -10px 0 0 -8px var(--accent);
+}
+.paper .el.is-locked {
+  box-shadow: -10px 0 0 -7px var(--add-strong);
+}
+.paper .el.has-mark:not(.is-empty)::after {
+  content: attr(data-mark);
+  position: absolute;
+  top: 0;
+  right: -56px;
+  width: 52px;
+  font: 600 9px/1.3 var(--ui);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--accent);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+.paper .el.is-locked:not(.is-empty)::after {
+  color: var(--add-strong);
+}
+.paper .el-scene.is-omitted {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+.mark-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.mark-bar .small-btn.on {
+  background: var(--tint);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.mark-bar .tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.mark-bar select {
+  font-size: 11px;
+  padding: 3px 6px;
+}
+.icon-btn.tiny {
+  padding: 0;
+}
+.icon-btn.tiny svg {
+  width: 11px;
+  height: 11px;
+}
+.findings {
+  gap: 4px;
+}
+.finding {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+}
+.finding svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+}
+.finding-fail svg,
+.fail-text {
+  color: var(--remove-strong);
+}
+.finding-warn svg {
+  color: var(--muted);
+}
+.finding-pass svg {
+  color: var(--add-strong);
+}
+.finding .code {
+  font: 600 11px/1.6 var(--mono);
+  min-width: 30px;
+}
+.finding .link-btn {
+  font-size: 12px;
+  text-align: left;
+}
+.ledger-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 20px;
+  margin-top: 16px;
+}
+.ledger-grid h3,
+.report-grid h3 {
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.counter-over {
+  color: var(--remove-strong);
+}
+.counter-under {
+  color: var(--muted);
+}
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.form label.check {
+  flex-direction: row;
+  flex: none;
+  color: var(--text);
+}
+.rule-row {
+  align-items: flex-start;
+  gap: 6px;
+}
+.code-input {
+  width: 56px;
+  flex: none;
+  font-family: var(--mono);
+}
+.num-input {
+  width: 64px;
+}
+.doc-item {
+  border-top: 1px solid var(--line);
+  padding: 12px 0;
+}
+.doc-item .row input {
+  flex: 1;
+}
+.card-fields {
+  margin: 0;
+}
+.card-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0;
+}
+.tag-fail {
+  background: var(--remove);
+  color: var(--remove-strong);
+}
+.proposal-report {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  padding: 12px 16px;
+  margin: 16px 0;
+}
+.proposal-report > summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+.report-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px 24px;
+  margin-top: 14px;
+}
+.report-grid blockquote {
+  margin: 0 0 6px;
+  padding-left: 10px;
+  border-left: 2px solid var(--line);
+  font-size: 12px;
+}
+.card-dl {
+  margin: 0 0 10px;
+  font-size: 12px;
+}
+.card-dl .dl-row {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  gap: 8px;
+}
+.card-dl dt {
+  color: var(--muted);
+}
+.card-dl dd {
+  margin: 0;
+}
+.pre {
+  white-space: pre-wrap;
+}
+@media (max-width: 900px) {
+  .report-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .paper .el.has-mark:not(.is-empty)::after {
+    position: static;
+    display: block;
+    width: auto;
+  }
+}
+
+/* ---------------------------------------------------------------- role reviews · writers' room */
+.tag-warn {
+  background: var(--warn);
+  color: var(--text);
+}
+.role-reviews {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.role-reviews h2 {
+  font-size: 15px;
+  margin: 0;
+}
+.role-reviews h3 {
+  font-size: 12px;
+  margin: 10px 0 4px;
+}
+.role-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.role-buttons .code {
+  font: 600 11px/1 var(--mono);
+}
+.role-buttons .small-btn.on {
+  border-color: var(--accent);
+  background: var(--tint);
+}
+.role-buttons .small-btn.recommended {
+  border-style: dashed;
+  border-color: var(--accent);
+}
+.risk {
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  background: var(--add);
+  color: var(--add-strong);
+}
+.risk-mid {
+  background: var(--warn);
+  color: var(--text);
+}
+.risk-high {
+  background: var(--remove);
+  color: var(--remove-strong);
+}
+.role-review {
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.role-review p {
+  margin: 0;
+}
+.table-wrap {
+  overflow-x: auto;
+}
+.session-summary {
+  display: grid;
+  gap: 6px;
+  /* 좁은 패널에서 대화 기록을 밀어내지 않게 */
+  max-height: 40vh;
+  overflow-y: auto;
+  flex: none;
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--tint);
+}
+.session-summary h3 {
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+.session-summary li {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  margin-bottom: 6px;
+}
+.session-summary p {
+  margin: 0;
+}
+
+.tag-muted {
+  background: transparent;
+  border: 1px dashed var(--line);
+  color: var(--muted);
+}
+.parallel .losses {
+  margin-top: 16px;
+}
+.parallel .losses td {
+  font-size: 12px;
+  vertical-align: top;
+}
+
 /* ---------------------------------------------------------------- responsive */
 @media (max-width: 1100px) {
   .workspace {

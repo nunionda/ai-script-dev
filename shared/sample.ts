@@ -65,7 +65,8 @@ export function sampleProject(): Omit<Project, 'id' | 'rev' | 'createdAt' | 'upd
       서윤: { description: '32세. 서울에서 영상 편집 일을 한다. 아버지와 감정을 말로 나누는 데 서툴다.' },
       동하: { description: '67세. 40년째 극장을 지킨 영사기사. 감정을 행동으로만 드러낸다.' },
     },
-    decisions: ['두 인물의 화해를 서두르지 않는다. 감정은 대사보다 행동에 남긴다.'],
+    ...bibleDefaults(),
+    rulings: [{ id: uid('d'), code: 'D1', text: '두 인물의 화해를 서두르지 않는다. 감정은 대사보다 행동에 남긴다.' }],
     openQuestions: ['서윤이 남는 것과 아버지를 이해하는 것은 같은 선택일까?'],
   };
 }
@@ -85,7 +86,22 @@ export function blankProject(title: string): Omit<Project, 'id' | 'rev' | 'creat
     acts: [act, { id: uid('a'), title: '2막' }, { id: uid('a'), title: '3막' }],
     sceneMeta: { [first.id]: { act: act.id } },
     characters: {},
-    decisions: [],
+    ...bibleDefaults(),
     openQuestions: [],
+  };
+}
+
+/** 작품 바이블 기본값: 판정서·규칙·태그가 비어 있는 상태 */
+export function bibleDefaults(): Pick<Project, 'rulings' | 'oneAction' | 'hardRules' | 'bannedWords' | 'tagCategories' | 'elementMarks' | 'auditOptions' | 'numberingLocked' | 'translation'> {
+  return {
+    rulings: [],
+    oneAction: '',
+    hardRules: [],
+    bannedWords: [],
+    tagCategories: [],
+    elementMarks: {},
+    auditOptions: { banVoiceOver: false, requireSceneCard: false },
+    numberingLocked: false,
+    translation: null,
   };
 }

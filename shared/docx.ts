@@ -1,9 +1,10 @@
 import type { ElementType, Project } from './types';
+import { printableElements, sceneLabels } from './screenplay';
 
 // Word(.docx) 내보내기. 인쇄용 원고(PrintView)와 같은 여백·들여쓰기·표지를 OOXML로 옮긴다.
 // 요소마다 같은 이름의 단락 스타일을 만들어 Word에서도 서식을 고쳐 쓸 수 있게 한다.
 
-type DocxProject = Pick<Project, 'title' | 'author' | 'contact' | 'elements' | 'format'>;
+type DocxProject = Pick<Project, 'title' | 'author' | 'contact' | 'elements' | 'format'> & Partial<Pick<Project, 'sceneMeta' | 'numberingLocked'>>;
 
 const TWIP = 1440; // 1인치
 const PAGE = {
@@ -100,16 +101,18 @@ function body(project: DocxProject): string {
   }
   if (project.contact) p('Normal', runs(project.contact), `<w:spacing w:before="${3 * TWIP}"/>`);
 
-  let n = 0;
-  project.elements.forEach((e, i) => {
+  const source = { ...project, acts: [], sceneMeta: project.sceneMeta ?? {} };
+  const labels = sceneLabels(source);
+  const elements = printableElements(source);
+  elements.forEach((e, i) => {
     const pageBreak = i === 0 ? '<w:pageBreakBefore/>' : '';
     if (e.type !== 'scene') return p(styleId(e.type), runs(e.text), pageBreak);
-    n++;
+    const n = labels.get(e.id);
     if (project.format === 'korean') return p('SceneHeading', runs(`S#${n}. ${e.text}`), pageBreak);
     // 할리우드 서식: 장면 번호를 왼쪽 여백에 둔다.
     p('SceneHeading', runs(`${n}`, '<w:rPr><w:b w:val="0"/></w:rPr>') + '<w:r><w:tab/></w:r>' + runs(e.text), `${pageBreak}<w:ind w:left="0" w:hanging="${Math.round(0.75 * TWIP)}"/>`);
   });
-  if (!project.elements.length) p('Action', '', '<w:pageBreakBefore/>');
+  if (!elements.length) p('Action', '', '<w:pageBreakBefore/>');
   return out.join('');
 }
 

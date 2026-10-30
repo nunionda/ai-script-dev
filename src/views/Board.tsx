@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowDown, ArrowUp, NotebookPen, Plus, Sparkles, Trash2 } from 'lucide-react';
-import type { Act, Project, Proposal } from '../../shared/types';
+import type { Act, Project, Proposal, SceneLink, SceneMeta, TurnBy } from '../../shared/types';
+import { auditProject, needsEthicsReview } from '../../shared/audit';
 import { el, getScenes, reorderScenes, uid, type SceneInfo } from '../../shared/screenplay';
 import { formatEighths, paginate } from '../../shared/pagination';
 import { api } from '../api';
-import { useProject } from '../state';
+import { loadMe, useProject } from '../state';
 import { go, projectPath, useAnnounce } from '../ui';
 
 type Layout = { actId: string; sceneIds: string[] }[];
@@ -68,7 +69,16 @@ export function Board() {
     else moveScene(scene.id, target.act, dir === -1 ? target.s.id : flat[j + 1]?.act === target.act ? flat[j + 1].s.id : null);
   };
 
-  const setMeta = (sceneId: string, patch: { synopsis?: string; intent?: string }) =>
+  const findings = useMemo(() => auditProject(project), [project]);
+  const failsByScene = useMemo(() => {
+    const m = new Map<string, string[]>();
+    for (const f of findings) if (f.level === 'fail' && f.sceneId) m.set(f.sceneId, [...(m.get(f.sceneId) ?? []), f.message]);
+    return m;
+  }, [findings]);
+  const issueScenes = useMemo(() => new Set(findings.map((f) => f.sceneId).filter(Boolean)), [findings]);
+  const [onlyIssues, setOnlyIssues] = useState(false);
+
+  const setMeta = (sceneId: string, patch: Partial<SceneMeta>) =>
     update((p) => ({ sceneMeta: { ...p.sceneMeta, [sceneId]: { ...p.sceneMeta[sceneId], ...patch } } }));
 
   const addScene = (col: Column) => {
@@ -103,8 +113,13 @@ export function Board() {
     setAiBusy(s.id);
     try {
       const card = await api.sceneCard(project.id, s.id);
-      setMeta(s.id, { synopsis: card.synopsis, intent: s.meta.intent?.trim() ? s.meta.intent : card.intent });
-      announce(`S#${s.number} 장면 카드를 AI 요약으로 채웠습니다.`);
+      // 요약은 새로 받고, 작가가 이미 적은 카드 항목은 그대로 둔다
+      const filled: Partial<SceneMeta> = { synopsis: card.synopsis };
+      for (const k of ['intent', 'pov', 'goal', 'obstacle', 'outcome', 'valueStart', 'valueEnd', 'turnBy', 'link'] as const) {
+        if (!String(s.meta[k] ?? '').trim()) (filled as Record<string, unknown>)[k] = card[k];
+      }
+      setMeta(s.id, filled);
+      announce(`S#${s.label} 장면 카드를 AI 요약으로 채웠습니다.`);
     } catch (e) {
       announce(e instanceof Error ? e.message : 'AI 요약을 만들지 못했습니다.');
     } finally {
@@ -122,7 +137,13 @@ export function Board() {
             {project.title} · {scenes.length}개 장면 · 카드를 끌어 순서와 막을 바꾸면 원고에도 반영됩니다
           </p>
         </div>
-        <button onClick={() => go(projectPath(project.id, 'write'))}>원고로 돌아가기 →</button>
+        <div className="row tight">
+          <label className="check">
+            <input type="checkbox" checked={onlyIssues} onChange={(e) => setOnlyIssues(e.target.checked)} />
+            점검 걸린 장면만
+          </label>
+          <button onClick={() => go(projectPath(project.id, 'write'))}>원고로 돌아가기 →</button>
+        </div>
       </div>
 
       <div className="board-grid" style={{ gridTemplateColumns: `repeat(${columns.length + 1}, minmax(240px, 1fr))` }}>
@@ -156,7 +177,7 @@ export function Board() {
                 </button>
               )}
             </div>
-            {col.scenes.map((s) => (
+            {col.scenes.filter((s) => !onlyIssues || issueScenes.has(s.id)).map((s) => (
               <article
                 key={s.id}
                 className={`beat${pendingByScene.has(s.id) ? ' beat-active' : ''}${dragId === s.id ? ' dragging' : ''}${dropTarget === `card:${s.id}` ? ' drop-before' : ''}`}
@@ -186,7 +207,7 @@ export function Board() {
               >
                 <span className="eyebrow">
                   {project.format === 'korean' ? 'S#' : 'SCENE '}
-                  {s.number} · {[s.parts.place, s.parts.time].filter(Boolean).join(' / ') || '헤딩 미정'} · {formatEighths(eighths.get(s.id) ?? 1)}쪽
+                  {s.label} · {[s.parts.place, s.parts.time].filter(Boolean).join(' / ') || '헤딩 미정'} · {formatEighths(eighths.get(s.id) ?? 1)}쪽
                 </span>
                 <h3>{s.parts.location || s.heading || '(제목 없는 장면)'}</h3>
                 {editing === s.id ? (
@@ -198,6 +219,12 @@ export function Board() {
                     <label>
                       장면의 의도
                       <textarea rows={2} value={s.meta.intent ?? ''} onChange={(e) => setMeta(s.id, { intent: e.target.value })} />
+                    </label>
+                    <CardFields meta={s.meta} onChange={(patch) => setMeta(s.id, patch)} />
+                    <SignoffField meta={s.meta} required={needsEthicsReview(project, s.id)} onChange={(patch) => setMeta(s.id, patch)} />
+                    <label className="check">
+                      <input type="checkbox" checked={Boolean(s.meta.omitted)} onChange={(e) => setMeta(s.id, { omitted: e.target.checked || undefined })} />
+                      삭제 장면 (번호 유지)
                     </label>
                     <div className="row tight">
                       <button className="icon-btn" onClick={() => nudge(s, -1)} aria-label="앞으로 옮기기">
@@ -215,6 +242,7 @@ export function Board() {
                   <p onDoubleClick={() => setEditing(s.id)}>{s.meta.synopsis || <span className="muted">요약이 없습니다. 편집을 눌러 쓰거나 AI 요약을 받아 보세요.</span>}</p>
                 )}
                 {s.characters.length > 0 && editing !== s.id && <p className="beat-cast">{s.characters.join(' · ')}</p>}
+                {editing !== s.id && <CardSummary meta={s.meta} fails={failsByScene.get(s.id) ?? []} ethics={needsEthicsReview(project, s.id)} />}
                 {editing !== s.id && (
                   <div className="row">
                     <div className="row tight">
@@ -286,5 +314,122 @@ function OpenQuestions() {
       </form>
       <span className="muted small">작가의 개발 메모 · AI 개발 파트너도 참고합니다</span>
     </div>
+  );
+}
+
+const LINKS: { value: SceneLink; label: string }[] = [
+  { value: 'therefore', label: '그래서' },
+  { value: 'but', label: '그러나' },
+  { value: 'andthen', label: '그리고 나서' },
+];
+
+/** 장면 카드: 쓰기 전에 선언하는 목표·장애·결과·가치 전환·연결어 */
+function CardFields({ meta, onChange }: { meta: SceneMeta; onChange: (patch: Partial<SceneMeta>) => void }) {
+  const text = (key: 'pov' | 'goal' | 'obstacle' | 'outcome' | 'valueStart' | 'valueEnd' | 'ratingNote', label: string, placeholder = '') => (
+    <label>
+      {label}
+      <input value={meta[key] ?? ''} placeholder={placeholder} onChange={(e) => onChange({ [key]: e.target.value })} />
+    </label>
+  );
+  return (
+    <fieldset className="card-fields">
+      <legend>장면 카드</legend>
+      {text('pov', '시점 인물')}
+      {text('goal', '목표', '누가 무엇을 원하는가')}
+      {text('obstacle', '장애')}
+      {text('outcome', '결과')}
+      <div className="row tight">
+        {text('valueStart', '시작 가치', '신뢰 +')}
+        {text('valueEnd', '끝 가치', '불신 −')}
+      </div>
+      <div className="row tight">
+        <label>
+          전환 수단
+          <select value={meta.turnBy ?? ''} onChange={(e) => onChange({ turnBy: (e.target.value || undefined) as TurnBy | undefined })}>
+            <option value="">—</option>
+            <option value="action">행동</option>
+            <option value="revelation">폭로</option>
+          </select>
+        </label>
+        <label>
+          직전 장면과
+          <select value={meta.link ?? ''} onChange={(e) => onChange({ link: (e.target.value || undefined) as SceneLink | undefined })}>
+            <option value="">—</option>
+            {LINKS.map((l) => (
+              <option key={l.value} value={l.value}>
+                {l.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      {text('ratingNote', '수위·재현 메모', '노출 정도, 시뮬레이션 범위, 카메라 원칙')}
+    </fieldset>
+  );
+}
+
+function CardSummary({ meta, fails, ethics }: { meta: SceneMeta; fails: string[]; ethics: boolean }) {
+  const link = LINKS.find((l) => l.value === meta.link)?.label;
+  if (!link && !meta.valueStart && !meta.valueEnd && !fails.length && !meta.omitted && !ethics && !meta.signoff) return null;
+  return (
+    <p className="card-summary">
+      {meta.omitted && <span className="tag">삭제</span>}
+      {link && <span className={`tag${meta.link === 'andthen' ? ' tag-fail' : ''}`}>{link}</span>}
+      {(meta.valueStart || meta.valueEnd) && (
+        <span className="muted small">
+          {meta.valueStart || '?'} → {meta.valueEnd || '?'}
+        </span>
+      )}
+      {meta.signoff ? (
+        <span className="tag" title={`${meta.signoff.by} 확인`}>
+          컨설턴트 확인
+        </span>
+      ) : (
+        ethics && <span className="tag tag-warn">컨설턴트 확인 필요</span>
+      )}
+      {fails.length > 0 && (
+        <span className="tag tag-fail" title={fails.join(' / ')}>
+          점검 FAIL {fails.length}
+        </span>
+      )}
+    </p>
+  );
+}
+
+/** 당사자 컨설턴트·감수자 확인 기록 */
+function SignoffField({ meta, required, onChange }: { meta: SceneMeta; required: boolean; onChange: (patch: Partial<SceneMeta>) => void }) {
+  const [by, setBy] = useState(() => loadMe().name);
+  const [note, setNote] = useState('');
+  const s = meta.signoff;
+  return (
+    <fieldset className="card-fields">
+      <legend>컨설턴트 확인{required && !s ? ' · 필요' : ''}</legend>
+      {s ? (
+        <div className="row">
+          <span className="small">
+            <strong>{s.by}</strong> · {new Date(s.at).toLocaleDateString('ko-KR')} 확인{s.note && ` — ${s.note}`}
+          </span>
+          <button className="small-btn" onClick={() => onChange({ signoff: undefined })}>
+            기록 지우기
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="row tight">
+            <label>
+              확인한 사람
+              <input value={by} onChange={(e) => setBy(e.target.value)} placeholder="이름 · 역할" />
+            </label>
+            <label>
+              의견
+              <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="조건부 승인 등" />
+            </label>
+          </div>
+          <button className="small-btn" disabled={!by.trim()} onClick={() => onChange({ signoff: { by: by.trim(), note: note.trim(), at: new Date().toISOString() } })}>
+            확인 기록
+          </button>
+        </>
+      )}
+    </fieldset>
   );
 }

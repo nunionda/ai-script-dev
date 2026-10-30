@@ -1,0 +1,668 @@
+import type { ElementType, ScriptElement } from './types';
+import { el, uid } from './screenplay';
+import { fromFountain, type ImportedScript } from './fountain';
+
+/*
+ * Word(.docx) · 한글(.hwpx, .hwp) · PDF · 일반 텍스트 원고 가져오기.
+ * 파일에서 문단(과 가능하면 문단 스타일·들여쓰기)을 뽑고, 시나리오 요소로 분류한다.
+ * 분류는 휴리스틱이다 — 가져온 뒤 집필 화면에서 요소 종류를 고칠 수 있다.
+ */
+
+export interface Paragraph {
+  text: string;
+  /** 문단 스타일 이름 (docx·hwpx) */
+  style?: string;
+  /** 본문 폭 대비 왼쪽 들여쓰기 비율 0..1 (PDF) */
+  indent?: number;
+  /** 오른쪽 정렬 (PDF) */
+  right?: boolean;
+  /** 표 안의 문단 — 원고가 아니라 부록·장면 대조표 등으로 본다 */
+  table?: boolean;
+}
+
+export interface ImportResult extends ImportedScript {
+  /** 첫 씬 헤딩 앞의 내용 (기획의도·줄거리·등장인물 …) */
+  preface: string;
+}
+
+// ---------------------------------------------------------------- zip
+
+/** raw DEFLATE 풀기. 한글 본문 스트림은 압축 데이터 뒤에 남는 바이트가 있어, 거기서 나는 오류는 무시하고 푼 만큼 쓴다. */
+async function inflateRaw(data: Uint8Array): Promise<Uint8Array> {
+  const reader = new Blob([data as BlobPart]).stream().pipeThrough(new DecompressionStream('deflate-raw')).getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.length;
+    }
+  } catch (e) {
+    if (!total) throw e;
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.length;
+  }
+  return out;
+}
+
+/** zip 항목을 모두 푼다 (STORE·DEFLATE) */
+export async function unzip(data: Uint8Array): Promise<Map<string, Uint8Array>> {
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  let eocd = -1;
+  for (let i = data.length - 22; i >= Math.max(0, data.length - 65557); i--) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) throw new Error('zip 형식이 아닙니다.');
+  const count = view.getUint16(eocd + 10, true);
+  let p = view.getUint32(eocd + 16, true);
+  const out = new Map<string, Uint8Array>();
+  const decoder = new TextDecoder();
+  for (let n = 0; n < count; n++) {
+    if (view.getUint32(p, true) !== 0x02014b50) break;
+    const method = view.getUint16(p + 10, true);
+    const size = view.getUint32(p + 20, true);
+    const nameLen = view.getUint16(p + 28, true);
+    const extraLen = view.getUint16(p + 30, true);
+    const commentLen = view.getUint16(p + 32, true);
+    const local = view.getUint32(p + 42, true);
+    const name = decoder.decode(data.subarray(p + 46, p + 46 + nameLen));
+    p += 46 + nameLen + extraLen + commentLen;
+    const start = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
+    const compSize = view.getUint32(local + 18, true) || size;
+    const raw = data.subarray(start, start + (method === 0 ? size : compSize));
+    if (method === 0) out.set(name, raw);
+    else if (method === 8) out.set(name, await inflateRaw(raw));
+  }
+  return out;
+}
+
+function decodeEntities(s: string): string {
+  return s.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (_, e: string) => {
+    if (e[0] === '#') return String.fromCodePoint(e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : Number(e.slice(1)));
+    return { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[e.toLowerCase()]!;
+  });
+}
+
+// ---------------------------------------------------------------- docx
+
+export async function docxParagraphs(data: Uint8Array): Promise<Paragraph[]> {
+  const files = await unzip(data);
+  const doc = files.get('word/document.xml');
+  if (!doc) throw new Error('Word 문서가 아닙니다.');
+  const xml = new TextDecoder().decode(doc);
+  // 스타일 id → 이름 (한국어 Word는 id가 숫자인 경우가 있다)
+  const names = new Map<string, string>();
+  const stylesXml = files.get('word/styles.xml');
+  if (stylesXml) {
+    for (const m of new TextDecoder().decode(stylesXml).matchAll(/<w:style\b[^>]*w:styleId="([^"]+)"[^>]*>[\s\S]*?<w:name w:val="([^"]+)"/g)) names.set(m[1], m[2]);
+  }
+  const body = xml.slice(xml.indexOf('<w:body'));
+  const out: Paragraph[] = [];
+  // 표(<w:tbl>) 범위
+  const tables: [number, number][] = [];
+  const stack: number[] = [];
+  for (const t of body.matchAll(/<(\/?)w:tbl[\s>]/g)) {
+    if (!t[1]) stack.push(t.index!);
+    else if (stack.length) {
+      const start = stack.pop()!;
+      if (!stack.length) tables.push([start, t.index!]);
+    }
+  }
+  const inTable = (at: number) => tables.some(([a, b]) => at > a && at < b);
+  for (const m of body.matchAll(/<w:p\b[^>]*?(?:\/>|>([\s\S]*?)<\/w:p>)/g)) {
+    const inner = m[1] ?? '';
+    const styleId = inner.match(/<w:pStyle w:val="([^"]+)"/)?.[1];
+    let text = '';
+    for (const t of inner.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>|<w:tab\/>|<w:(?:br|cr)\b[^>]*\/>/g)) {
+      if (t[1] !== undefined) text += decodeEntities(t[1]);
+      else text += t[0].startsWith('<w:tab') ? '\t' : '\n';
+    }
+    out.push({ text, style: styleId ? (names.get(styleId) ?? styleId) : undefined, ...(inTable(m.index!) ? { table: true } : {}) });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- hwpx
+
+export async function hwpxParagraphs(data: Uint8Array): Promise<Paragraph[]> {
+  const files = await unzip(data);
+  const sections = [...files.keys()].filter((k) => /^Contents\/section\d+\.xml$/i.test(k)).sort((a, b) => Number(a.match(/\d+/)![0]) - Number(b.match(/\d+/)![0]));
+  if (!sections.length) throw new Error('한글(.hwpx) 문서가 아닙니다.');
+  // 스타일 id → 이름
+  const names = new Map<string, string>();
+  const head = files.get('Contents/header.xml');
+  if (head) for (const m of new TextDecoder().decode(head).matchAll(/<hh:style\b[^>]*\bid="(\d+)"[^>]*\bname="([^"]*)"/g)) names.set(m[1], decodeEntities(m[2]));
+  const out: Paragraph[] = [];
+  for (const name of sections) {
+    const xml = new TextDecoder().decode(files.get(name));
+    // 표 안의 문단도 차례로 펼친다
+    let cur: Paragraph | null = null;
+    let inText = 0;
+    let tableDepth = 0;
+    for (const m of xml.matchAll(/<(\/?)(?:\w+:)?(p|t|tab|lineBreak|tbl)\b([^>]*?)(\/?)>|([^<]+)/g)) {
+      const [, close, tag, attrs, selfClose, text] = m;
+      if (text !== undefined) {
+        if (inText && cur) cur.text += decodeEntities(text);
+        continue;
+      }
+      if (tag === 'tbl') {
+        if (!selfClose) tableDepth += close ? -1 : 1;
+      } else if (tag === 'p' && !close) {
+        if (cur) out.push(cur);
+        cur = { text: '', style: names.get(attrs.match(/styleIDRef="(\d+)"/)?.[1] ?? ''), ...(tableDepth > 0 ? { table: true } : {}) };
+      } else if (tag === 'p' && close) {
+        if (cur) out.push(cur);
+        cur = null;
+      } else if (tag === 't') {
+        if (selfClose) continue;
+        inText += close ? -1 : 1;
+      } else if (cur && tag === 'tab') cur.text += '\t';
+      else if (cur && tag === 'lineBreak') cur.text += '\n';
+    }
+    if (cur) out.push(cur);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- hwp 5.0 (복합 파일)
+
+/** 복합 파일(CFB)에서 경로별 스트림을 읽는다 */
+function readCfb(data: Uint8Array): Map<string, Uint8Array> {
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  if (view.getUint32(0, true) !== 0xe011cfd0 || view.getUint32(4, true) !== 0xe11ab1a1) throw new Error('한글(.hwp) 문서가 아닙니다.');
+  const sectorSize = 1 << view.getUint16(30, true);
+  const miniSize = 1 << view.getUint16(32, true);
+  const sector = (n: number) => 512 + n * sectorSize;
+  const ENDCHAIN = 0xfffffffe;
+
+  const fatSectors: number[] = [];
+  for (let i = 0; i < 109; i++) {
+    const s = view.getUint32(76 + i * 4, true);
+    if (s < 0xfffffffa) fatSectors.push(s);
+  }
+  for (let d = view.getUint32(68, true), guard = 0; d < 0xfffffffa && guard < 10000; guard++) {
+    const per = sectorSize / 4 - 1;
+    for (let i = 0; i < per; i++) {
+      const s = view.getUint32(sector(d) + i * 4, true);
+      if (s < 0xfffffffa) fatSectors.push(s);
+    }
+    d = view.getUint32(sector(d) + per * 4, true);
+  }
+  const fat: number[] = [];
+  for (const s of fatSectors) for (let i = 0; i < sectorSize / 4; i++) fat.push(view.getUint32(sector(s) + i * 4, true));
+
+  const chain = (start: number, table: number[]) => {
+    const out: number[] = [];
+    for (let s = start, guard = 0; s !== ENDCHAIN && s < table.length && guard < 1_000_000; guard++) {
+      out.push(s);
+      s = table[s];
+    }
+    return out;
+  };
+  const readChain = (start: number) => {
+    const parts = chain(start, fat).map((s) => data.subarray(sector(s), sector(s) + sectorSize));
+    const buf = new Uint8Array(parts.length * sectorSize);
+    parts.forEach((p, i) => buf.set(p, i * sectorSize));
+    return buf;
+  };
+
+  const dir = readChain(view.getUint32(48, true));
+  const dv = new DataView(dir.buffer);
+  const entries: { name: string; type: number; left: number; right: number; child: number; start: number; size: number }[] = [];
+  for (let off = 0; off + 128 <= dir.length; off += 128) {
+    const nameLen = dv.getUint16(off + 64, true);
+    let name = '';
+    for (let i = 0; i < Math.max(0, nameLen / 2 - 1); i++) name += String.fromCharCode(dv.getUint16(off + i * 2, true));
+    entries.push({
+      name,
+      type: dir[off + 66],
+      left: dv.getUint32(off + 68, true),
+      right: dv.getUint32(off + 72, true),
+      child: dv.getUint32(off + 76, true),
+      start: dv.getUint32(off + 116, true),
+      size: dv.getUint32(off + 120, true),
+    });
+  }
+  const root = entries[0];
+  const miniStream = readChain(root.start);
+  const miniFat: number[] = [];
+  const miniFatBytes = view.getUint32(64, true) ? readChain(view.getUint32(60, true)) : new Uint8Array();
+  const mv = new DataView(miniFatBytes.buffer);
+  for (let i = 0; i + 4 <= miniFatBytes.length; i += 4) miniFat.push(mv.getUint32(i, true));
+  const cutoff = view.getUint32(56, true);
+
+  const out = new Map<string, Uint8Array>();
+  const walk = (id: number, prefix: string, guard = 0) => {
+    if (id >= entries.length || id === 0xffffffff || guard > 10000) return;
+    const e = entries[id];
+    walk(e.left, prefix, guard + 1);
+    walk(e.right, prefix, guard + 1);
+    const path = prefix + e.name;
+    if (e.type === 1) walk(e.child, `${path}/`, guard + 1);
+    else if (e.type === 2) {
+      if (e.size < cutoff) {
+        const parts = chain(e.start, miniFat).map((s) => miniStream.subarray(s * miniSize, (s + 1) * miniSize));
+        const buf = new Uint8Array(parts.length * miniSize);
+        parts.forEach((p, i) => buf.set(p, i * miniSize));
+        out.set(path, buf.subarray(0, e.size));
+      } else out.set(path, readChain(e.start).subarray(0, e.size));
+    }
+  };
+  walk(root.child, '');
+  return out;
+}
+
+const HWPTAG_PARA_HEADER = 66;
+const HWPTAG_PARA_TEXT = 67;
+
+/** 문단 글자의 제어 문자: 확장·인라인 제어는 8글자(16바이트)를 차지한다 */
+function paraText(rec: Uint8Array): string {
+  const v = new DataView(rec.buffer, rec.byteOffset, rec.byteLength);
+  let s = '';
+  for (let i = 0; i + 1 < rec.length; ) {
+    const c = v.getUint16(i, true);
+    if (c >= 32) {
+      s += String.fromCharCode(c);
+      i += 2;
+    } else if (c === 9) {
+      s += '\t';
+      i += 16;
+    } else if (c === 10) {
+      s += '\n';
+      i += 2;
+    } else if (c === 13) break;
+    else if ((c >= 1 && c <= 8) || c === 11 || c === 12 || (c >= 14 && c <= 23)) i += 16;
+    else i += 2;
+  }
+  return s;
+}
+
+export async function hwpParagraphs(data: Uint8Array): Promise<Paragraph[]> {
+  const files = readCfb(data);
+  const header = files.get('FileHeader');
+  if (!header || new TextDecoder().decode(header.subarray(0, 17)) !== 'HWP Document File') throw new Error('한글(.hwp) 문서가 아닙니다.');
+  const flags = new DataView(header.buffer, header.byteOffset).getUint32(36, true);
+  if (flags & 0b10) throw new Error('암호가 걸린 한글 문서는 가져올 수 없습니다. 한글에서 암호를 풀고 다시 시도해 주세요.');
+  if (flags & 0b100) throw new Error('배포용 한글 문서는 가져올 수 없습니다. 한글에서 일반 문서로 저장한 뒤 다시 시도해 주세요.');
+  const compressed = Boolean(flags & 1);
+  const sections = [...files.keys()].filter((k) => /^BodyText\/Section\d+$/.test(k)).sort((a, b) => Number(a.match(/\d+$/)![0]) - Number(b.match(/\d+$/)![0]));
+  const out: Paragraph[] = [];
+  for (const name of sections) {
+    const body = compressed ? await inflateRaw(files.get(name)!) : files.get(name)!;
+    const v = new DataView(body.buffer, body.byteOffset, body.byteLength);
+    for (let p = 0; p + 4 <= body.length; ) {
+      const h = v.getUint32(p, true);
+      const tag = h & 0x3ff;
+      const level = (h >>> 10) & 0x3ff;
+      let size = h >>> 20;
+      p += 4;
+      if (size === 0xfff) {
+        size = v.getUint32(p, true);
+        p += 4;
+      }
+      // 표 안의 문단은 한 단계 깊은 레벨에 온다
+      if (tag === HWPTAG_PARA_HEADER) out.push(level > 0 ? { text: '', table: true } : { text: '' });
+      else if (tag === HWPTAG_PARA_TEXT && out.length) out[out.length - 1].text = paraText(body.subarray(p, p + size));
+      p += size;
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- 문단 → 시나리오 요소
+
+const STYLE_TYPE: [RegExp, ElementType][] = [
+  [/^(scene ?heading|씬 ?헤딩|장면 ?제목|scene|slug)/i, 'scene'],
+  [/^(action|description|지문)/i, 'action'],
+  [/^(character|인물|배역)/i, 'character'],
+  [/^(parenthetical|괄호)/i, 'parenthetical'],
+  [/^(dialog(ue)?|대사)/i, 'dialogue'],
+  [/^(transition|전환)/i, 'transition'],
+  [/^(shot|샷)/i, 'shot'],
+];
+
+const PLACE = String.raw`(?:INT|EXT|EST|I\/E|내부|외부|실내|실외|내\/외)`;
+/** 씬 헤딩: "S#12.", "씬 12", "#12", "12. INT.", "12 외부.", "INT. …", "내부. …" */
+const SCENE_RE = new RegExp(String.raw`^\s*(?:(?:S\s*#|씬|scene|#)\s*\d+(?:-\d+|[A-Z])?\s*[.):]?\s*|\d+(?:-\d+|[A-Z])?(?:\s*[.)]\s*|\s+)(?=${PLACE}[.\s])|(?:INT|EXT|EST|INT\.?\/EXT|I\/E|내부|외부|실내|실외|내\/외)[.\s])`, 'i');
+const SCENE_NUMBER_RE = new RegExp(String.raw`^\s*(?:(?:S\s*#|씬|scene|#)\s*\d+(?:-\d+|[A-Z])?\s*[.):]?\s*|\d+(?:-\d+|[A-Z])?(?:\s*[.)]\s*|\s+)(?=${PLACE}[.\s]))`, 'i');
+const TRANSITION_RE = /^(?:(?:CUT|SMASH CUT|MATCH CUT|DISSOLVE|FADE)(?: (?:TO|IN|OUT))?[:.]?|FADE (?:IN|OUT)[:.]?|.+ TO:|(?:컷|페이드\s?(?:인|아웃)|디졸브|암전|F\.?\s?[IO]\.?|O\.?L\.?|C\.?\s?I\.?|C\.?\s?O\.?)\s*[.:]?)$/i;
+const CUE_EXT = /\s*\((?:V\.?O\.?|O\.?S\.?|O\.?C\.?|E|F|CONT'D|소리|목소리|전화|이어서)\)\s*$/i;
+/** 막 제목: "1막 떠나온 세계", "제2막", "ACT II" */
+const ACT_RE = /^(?:제\s*)?\d+\s*막(?:\s|$|[.:])|^ACT\s+(?:[IVX]+|\d+)\b/i;
+/** 이름: "동하", "형사 1", "도솔(Na)", "지훈 (V.O.)" */
+const NAME = String.raw`[가-힣A-Za-z0-9·]{1,12}(?: [가-힣A-Za-z0-9·]{1,10})?(?:\s?\([^)\n]{1,12}\))?`;
+/** "이름⇥(괄호) 대사" — 이름 칸과 대사 칸을 탭(또는 PDF의 넓은 간격)으로 나눈 원고 */
+const TAB_DIALOGUE_RE = new RegExp(String.raw`^(${NAME})\t+(?:(\([^)]*\))\s*)?(.+)$`, 's');
+/** 번호만 붙은 씬 헤딩: "3. 고급 펜션, 욕실 (오후/눈)", "1. 모니터 앞 – D" */
+const NUMBERED_SCENE_RE = /^\d+(?:-\d+|[A-Z])?\.\s*[^\s\d.][^\n]{0,58}$/;
+/** "이름 : 대사", "이름: (괄호) 대사" — 한국 원고에서 흔한 형태 */
+const INLINE_DIALOGUE_RE = /^([가-힣A-Za-z0-9·]{1,12}(?: [가-힣A-Za-z0-9·]{1,10})?(?:\s?\((?:V\.?O\.?|O\.?S\.?|E|F|소리|목소리|전화)\))?)\s*[:：]\s*(?:(\([^)]*\))\s*)?(.+)$/;
+
+function looksLikeCue(text: string, next: string | undefined): boolean {
+  const t = text.trim().replace(CUE_EXT, '');
+  if (!t || !next?.trim() || t.length > 24) return false;
+  if (/[.,!?。…"'“”‘’~:]$/.test(t) || /[.,!?]/.test(t)) return false;
+  // 영문: 대문자 이름
+  if (/[A-Za-z]/.test(t)) return t === t.toUpperCase() && !/[가-힣]/.test(t);
+  // 한글: 공백 없는 짧은 이름 (예: 동하, 서윤, 형사1)
+  return /^[가-힣0-9·]{1,8}$/.test(t);
+}
+
+/** 문단 목록을 시나리오 요소로 분류한다 */
+export function fromParagraphs(paras: Paragraph[]): ImportResult {
+  const result: ImportResult = { title: '', author: '', contact: '', elements: [], acts: [], sceneMeta: {}, preface: '' };
+  // 줄을 맞추려고 넣은 연속 공백은 하나로 (탭은 이름·대사 구분에 쓰므로 둔다)
+  // 표 안의 문단은 원고에서 빼고 참고 문서 쪽에 남긴다
+  const tableText = paras.filter((p) => p.table && p.text.trim()).map((p) => p.text.trim());
+  const clean = paras.filter((p) => !p.table).map((p) => ({ ...p, text: p.text.replace(/\r/g, '').replace(/\u00a0/g, ' ').replace(/ {2,}/g, ' ').replace(/[ \t]+$/gm, '') }));
+  const styled = clean.filter((p) => p.style && STYLE_TYPE.some(([re]) => re.test(p.style!))).length;
+  const useStyles = styled >= Math.max(3, clean.filter((p) => p.text.trim()).length * 0.3);
+  // 씬 헤딩처럼 보이는 줄 대부분이 한 스타일(예: "제목 2")이면, 그 스타일인 줄만 씬 헤딩으로 본다.
+  // 원고 뒤의 장면 대조표·메모처럼 번호로 시작하는 일반 문단을 장면으로 잘못 읽지 않게 한다.
+  const sceneLike = clean.filter((p) => SCENE_RE.test(p.text.trim()) && !p.text.trim().includes('\n'));
+  const styleCount = new Map<string, number>();
+  for (const p of sceneLike) if (p.style) styleCount.set(p.style, (styleCount.get(p.style) ?? 0) + 1);
+  const [topStyle, topCount] = [...styleCount].sort((a, b) => b[1] - a[1])[0] ?? ['', 0];
+  const sceneStyle = topCount >= 3 && topCount >= sceneLike.length * 0.4 ? topStyle : '';
+  // 번호만 붙은 씬 헤딩은 문서 안에서 번호가 차례로 늘어날 때만 씬 헤딩으로 본다 (번호 목록과 구분)
+  const nums = clean.map((p) => p.text.trim()).filter((t) => NUMBERED_SCENE_RE.test(t)).map((t) => parseInt(t, 10));
+  const rising = nums.slice(1).filter((n, k) => n > nums[k]).length;
+  // S#·INT.·내부 같은 정식 씬 헤딩이 있는 원고에서는 쓰지 않는다 (기획안의 "1. 로그라인" 같은 번호 목록)
+  const numberedScenes = sceneLike.length < 3 && nums.length >= 3 && rising >= (nums.length - 1) * 0.7;
+  const isSceneLine = (p: Paragraph) => {
+    const t = p.text.trim();
+    if (t.includes('\n')) return false;
+    if (SCENE_RE.test(t)) return !sceneStyle || p.style === sceneStyle;
+    return numberedScenes && NUMBERED_SCENE_RE.test(t);
+  };
+
+  let firstScene = clean.findIndex((p) => {
+    if (useStyles && p.style) return STYLE_TYPE.find(([re]) => re.test(p.style!))?.[1] === 'scene';
+    return isSceneLine(p);
+  });
+  // 첫 장면 바로 위의 막 제목("1막 …")은 본문에 넣는다
+  for (let k = firstScene - 1; k >= 0 && (!clean[k].text.trim() || ACT_RE.test(clean[k].text.trim())); k--) {
+    if (clean[k].text.trim()) firstScene = k;
+  }
+  const preface = firstScene > 0 ? clean.slice(0, firstScene) : [];
+  const body = firstScene >= 0 ? clean.slice(firstScene) : clean;
+  const prefaceLines = preface.map((p) => p.text.trim()).filter((t) => t && !/^\d+\.?$/.test(t));
+  result.title = prefaceLines[0]?.slice(0, 200) ?? '';
+  result.preface = [prefaceLines.join('\n'), tableText.length ? `[표]\n${tableText.join('\n')}` : ''].filter(Boolean).join('\n\n');
+
+  let pendingAct: string | null = null;
+  const push = (type: ElementType, text: string) => {
+    // 쪽을 넘어가며 붙는 "(CONT'D)"는 이름이 아니다
+    const e = el(type, type === 'character' ? text.replace(/\s*\((?:CONT['’]?D|계속|이어서)\)\s*$/i, '') : text);
+    result.elements.push(e);
+    // 막 제목 바로 뒤의 장면이 그 막을 연다
+    if (type === 'scene' && pendingAct) {
+      result.sceneMeta[e.id] = { act: pendingAct };
+      pendingAct = null;
+    }
+    return e;
+  };
+  const last = (): ScriptElement | undefined => result.elements[result.elements.length - 1];
+  // 앞의 장면 번호를 떼고, 할리우드 원고의 오른쪽 장면 번호("INT. ROOM - DAY 12")도 뗀다
+  const heading = (t: string) => {
+    let h = t.replace(SCENE_NUMBER_RE, '').trim() || t.trim();
+    if (numberedScenes && NUMBERED_SCENE_RE.test(h)) h = h.replace(/^\d+(?:-\d+|[A-Z])?\.\s*/, '');
+    return /^(INT|EXT|EST|I\/E)/i.test(h) ? h.replace(/\s+\d+[A-Z]?\.?$/, '') : h;
+  };
+
+  // 빈 문단으로 요소 덩어리를 나누는 원고(이름↵대사↵대사↵빈 줄)인가, 문단 하나가 요소 하나인 원고인가
+  const nonBlank = body.filter((p) => p.text.trim()).length;
+  const blockMode = body.length - nonBlank >= nonBlank * 0.2;
+
+  let inDialogue = false;
+  for (let i = 0; i < body.length; i++) {
+    const p = body[i];
+    const text = p.text.trim();
+    if (!text) {
+      inDialogue = false;
+      continue;
+    }
+    // 쪽 번호·머리말 흔적
+    if (/^\d+\.?$/.test(text) || /^-\s*\d+\s*-$/.test(text) || /^[-–—_=.·•\s]+$/.test(text) || /^\(?(MORE|계속)\)?$/i.test(text)) continue;
+    // 막 제목: "1막 …", "제2막", "ACT II"
+    if (ACT_RE.test(text) && text.length <= 60) {
+      const act = { id: uid('a'), title: text };
+      result.acts.push(act);
+      pendingAct = act.id;
+      inDialogue = false;
+      continue;
+    }
+
+    if (useStyles && p.style) {
+      const type = STYLE_TYPE.find(([re]) => re.test(p.style!))?.[1];
+      if (type) {
+        push(type, type === 'scene' ? heading(text) : text);
+        continue;
+      }
+    }
+
+    if (isSceneLine(p)) {
+      push('scene', heading(text));
+      inDialogue = false;
+      continue;
+    }
+    if (TRANSITION_RE.test(text) || (p.right && /:$/.test(text))) {
+      push('transition', text);
+      inDialogue = false;
+      continue;
+    }
+
+    // 들여쓰기 정보가 있으면 (PDF) 위치로 판단
+    if (p.indent !== undefined) {
+      if (p.indent >= 0.3 && p.indent < 0.6 && looksLikeCue(text, body[i + 1]?.text)) {
+        push('character', text);
+        inDialogue = true;
+        continue;
+      }
+      if (inDialogue && p.indent >= 0.1) {
+        if (/^\(.*\)$/s.test(text)) push('parenthetical', text);
+        else if (last()?.type === 'dialogue') last()!.text += `\n${text}`;
+        else push('dialogue', text);
+        continue;
+      }
+      inDialogue = false;
+      const inlineCue = text.match(INLINE_DIALOGUE_RE) ?? text.match(TAB_DIALOGUE_RE);
+      if (inlineCue) {
+        push('character', inlineCue[1].trim());
+        if (inlineCue[2]) push('parenthetical', inlineCue[2]);
+        push('dialogue', inlineCue[3].trim());
+        continue;
+      }
+      // 빈 줄 없이 바로 이어지는 들여쓴 줄은 앞 대사의 다음 줄 (빈 줄로 덩어리를 나누는 원고에서만)
+      if (blockMode && last()?.type === 'dialogue' && body[i - 1]?.text.trim() && p.indent > 0.05) {
+        last()!.text += `\n${text}`;
+        continue;
+      }
+      push('action', text);
+      continue;
+    }
+
+    const inline = text.match(INLINE_DIALOGUE_RE);
+    if (inline && !SCENE_RE.test(text)) {
+      push('character', inline[1].trim());
+      if (inline[2]) push('parenthetical', inline[2]);
+      push('dialogue', inline[3].trim());
+      inDialogue = false;
+      continue;
+    }
+    // 탭으로 이름과 대사를 나눈 원고
+    const tab = text.match(TAB_DIALOGUE_RE);
+    if (tab) {
+      push('character', tab[1]);
+      if (tab[2]) push('parenthetical', tab[2]);
+      push('dialogue', tab[3].trim());
+      inDialogue = false;
+      continue;
+    }
+    // 대사 중에 이름 줄이 오면 다음 화자 (빈 줄 없이 이어 쓴 원고)
+    if (looksLikeCue(text, body[i + 1]?.text) && (!inDialogue || last()?.type === 'dialogue')) {
+      push('character', text);
+      inDialogue = true;
+      continue;
+    }
+    if (inDialogue) {
+      const paren = /^\(.*\)$/s.test(text);
+      // 빈 줄로 덩어리를 나누지 않는 원고는 대사가 한 문단이다. 대사 다음 문단은 지문으로 본다
+      if (!blockMode && last()?.type === 'dialogue' && !paren) inDialogue = false;
+      else {
+        if (paren) push('parenthetical', text);
+        else if (last()?.type === 'dialogue') last()!.text += `\n${text}`;
+        else push('dialogue', text);
+        continue;
+      }
+    }
+    push('action', text);
+  }
+  if (result.acts.length) {
+    const first = result.elements.find((e) => e.type === 'scene');
+    if (first && !result.sceneMeta[first.id]?.act) (result.sceneMeta[first.id] ??= {}).act = result.acts[0].id;
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------- 파일 → 원고
+
+export type ImportKind = 'fdx' | 'fountain' | 'docx' | 'hwpx' | 'hwp' | 'pdf' | 'txt';
+
+export function importKind(name: string, head: Uint8Array): ImportKind | null {
+  const ext = name.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ?? '';
+  if (ext === 'fdx') return 'fdx';
+  if (ext === 'fountain' || ext === 'spmd') return 'fountain';
+  if (ext === 'docx') return 'docx';
+  if (ext === 'hwpx') return 'hwpx';
+  if (ext === 'hwp') return 'hwp';
+  if (ext === 'pdf') return 'pdf';
+  if (ext === 'txt') return 'txt';
+  // 확장자가 없으면 내용으로
+  if (head[0] === 0x25 && head[1] === 0x50 && head[2] === 0x44 && head[3] === 0x46) return 'pdf';
+  if (head[0] === 0xd0 && head[1] === 0xcf) return 'hwp';
+  return null;
+}
+
+/** 일반 텍스트: Fountain 형식이면 Fountain으로, 아니면 문단 휴리스틱으로 */
+export function fromText(text: string): ImportResult {
+  const normalized = text.replace(/\r\n?/g, '\n');
+  const fountainLike = /^(?:INT|EXT|EST|I\/E)[.\s]/m.test(normalized) && /\n\s*\n/.test(normalized) && !/^\s*S\s*#\s*\d+/m.test(normalized);
+  if (fountainLike) return { ...fromFountain(normalized), preface: '' };
+  return fromParagraphs(normalized.split('\n').map((line) => ({ text: line })));
+}
+
+export async function importBinary(kind: 'docx' | 'hwpx' | 'hwp', data: Uint8Array): Promise<ImportResult> {
+  const paras = kind === 'docx' ? await docxParagraphs(data) : kind === 'hwpx' ? await hwpxParagraphs(data) : await hwpParagraphs(data);
+  return fromParagraphs(paras);
+}
+
+// ---------------------------------------------------------------- PDF 글자 조각 → 문단
+
+export interface PdfPage {
+  height: number;
+  /** 쪽 폭(pt). 글이 적은 쪽에서 본문 폭을 가늠하는 데 쓴다 */
+  width?: number;
+  items: { text: string; x: number; y: number; w: number; size: number }[];
+}
+
+interface PdfLine {
+  y: number;
+  x: number;
+  right: number;
+  size: number;
+  text: string;
+}
+
+/**
+ * 시나리오 PDF는 들여쓰기로 인물·대사가 갈리므로 본문 폭 대비 왼쪽 위치(indent)를 함께 넘긴다.
+ * 줄 간격이 좁고 들여쓰기가 같은 줄은 한 문단으로 잇는다.
+ */
+export function pdfTextToParagraphs(pages: PdfPage[]): Paragraph[] {
+  const out: Paragraph[] = [];
+  let chars = 0;
+  // 거의 모든 쪽의 같은 자리에 반복되는 글(머리말·꼬리말·워터마크)은 본문이 아니다.
+  // 자리까지 같아야 한다 — "CUT TO:"처럼 쪽마다 다른 자리에 나오는 본문은 남긴다
+  const spot = (i: PdfPage['items'][number]) => `${i.text.trim()}@${Math.round(i.x / 4)},${Math.round(i.y / 4)}`;
+  const repeated = new Set<string>();
+  if (pages.length >= 3) {
+    const seen = new Map<string, number>();
+    for (const page of pages) for (const k of new Set(page.items.filter((i) => i.text.trim().length >= 2).map(spot))) seen.set(k, (seen.get(k) ?? 0) + 1);
+    // 짧은 글(워터마크 이름 등)은 더 많은 쪽에서 반복될 때만 지운다
+    for (const [k, n] of seen) {
+      const long = k.indexOf('@') >= 6;
+      if (long ? n >= pages.length * 0.6 : pages.length >= 8 && n >= pages.length * 0.8) repeated.add(k);
+    }
+  }
+  for (const page of pages) {
+    const items = page.items.filter((i) => !repeated.has(spot(i))).sort((a, b) => b.y - a.y || a.x - b.x);
+    // 같은 높이의 조각을 한 줄로 모은다
+    const rows: { y: number; size: number; parts: typeof items }[] = [];
+    for (const it of items) {
+      const cur = rows[rows.length - 1];
+      if (cur && Math.abs(cur.y - it.y) <= it.size * 0.4) cur.parts.push(it);
+      else rows.push({ y: it.y, size: it.size, parts: [it] });
+    }
+    const lines: PdfLine[] = rows.map((row) => {
+      const parts = row.parts.sort((a, b) => a.x - b.x);
+      const gaps = parts.slice(1).map((it, k) => it.x - (parts[k].x + parts[k].w));
+      const wide = gaps.map((g) => g > row.size * 1.5);
+      // 이름 칸과 대사 칸 사이의 넓은 간격 하나만 탭으로 남긴다. 양쪽 정렬로 넓어진 단어 간격(여러 개)은 공백
+      const tabAt = wide.filter(Boolean).length === 1 && wide[0] ? 0 : -1;
+      let text = parts[0].text;
+      parts.slice(1).forEach((it, k) => {
+        const sep = k === tabAt ? '\t' : gaps[k] > row.size * 0.2 && !text.endsWith(' ') && !it.text.startsWith(' ') ? ' ' : '';
+        text = (sep === '\t' ? text.replace(/ +$/, '') : text) + sep + (sep === '\t' ? it.text.replace(/^ +/, '') : it.text);
+      });
+      return { y: row.y, x: parts[0].x, right: Math.max(...parts.map((p) => p.x + p.w)), size: row.size, text };
+    });
+    // 머리말·꼬리말의 쪽 번호 ("12." / "제목 / 12")
+    const body = lines.filter((l) => !((l.y > page.height * 0.9 || l.y < page.height * 0.07) && /(^|\/\s*)\d+\.?$/.test(l.text.trim()) && l.text.length < 60));
+    if (!body.length) continue;
+    chars += body.reduce((a, l) => a + l.text.length, 0);
+
+    const xs = body.map((l) => l.x).sort((a, b) => a - b);
+    const left = xs[Math.floor(xs.length * 0.1)];
+    const rightEdge = Math.max(...body.map((l) => l.right));
+    // 본문 폭: 보이는 글의 폭과, 쪽 폭에서 오른쪽 여백 1인치를 뺀 폭 가운데 큰 쪽 (글이 적은 쪽 대비)
+    const width = Math.max(1, rightEdge - left, page.width ? page.width - left - 72 : 0);
+    const gaps = body
+      .slice(1)
+      .map((l, i) => body[i].y - l.y)
+      .filter((g) => g > 0)
+      .sort((a, b) => a - b);
+    const lineGap = gaps[Math.floor(gaps.length * 0.3)] ?? 14;
+
+    let prev: PdfLine | null = null;
+    for (const l of body) {
+      const indent = Math.max(0, (l.x - left) / width);
+      const gap = prev ? prev.y - l.y : Infinity;
+      const sameColumn = prev !== null && Math.abs(prev.x - l.x) < width * 0.03;
+      // 오른쪽 끝까지 찬 줄은 다음 줄로 이어진다 (내어쓰기한 "이름: 대사"의 둘째 줄 등)
+      // 단, 오른쪽으로 크게 들여 쓴 짧은 이름 줄(인물)은 앞 줄에 붙이지 않는다 — 쪽에 글이 적으면 지문 줄이 "가득 찬 줄"로 보일 수 있다
+      const cueLike = prev !== null && l.x - prev.x > width * 0.2 && looksLikeCue(l.text, 'x');
+      const prevFull = prev !== null && !cueLike && prev.right >= rightEdge - width * 0.08 && l.x >= left - width * 0.02;
+      const cur = out[out.length - 1];
+      const curIsHeading = Boolean(cur?.text && (SCENE_RE.test(cur.text) || NUMBERED_SCENE_RE.test(cur.text)) && !prevFull);
+      if (prev && cur?.text && !curIsHeading && gap <= lineGap * 1.35 && (sameColumn || prevFull) && !/^\(/.test(l.text.trim()) && !SCENE_RE.test(l.text.trim()) && !INLINE_DIALOGUE_RE.test(l.text.trim()) && !TAB_DIALOGUE_RE.test(l.text.trim()) && !NUMBERED_SCENE_RE.test(l.text.trim())) {
+        cur.text += ` ${l.text.trim()}`;
+      } else {
+        if (prev && gap > lineGap * 1.35) out.push({ text: '' });
+        out.push({ text: l.text.trim(), indent, right: l.right >= rightEdge - width * 0.02 && indent > 0.5 });
+      }
+      prev = l;
+    }
+    out.push({ text: '' });
+  }
+  if (!chars) throw new Error('글자가 없는 PDF입니다. 스캔한 원고는 가져올 수 없습니다.');
+  return out;
+}

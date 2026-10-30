@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { TriangleAlert } from 'lucide-react';
-import type { Proposal, ProposalStatus } from '../../shared/types';
+import { CircleAlert, CircleCheck, ShieldAlert, TriangleAlert } from 'lucide-react';
+import { REVIEW_ROLES, REVIEW_ROLE_LABEL, type OpenIssueKind, type Proposal, type ProposalStatus, type ReviewRole, type RiskLevel } from '../../shared/types';
+import { lockedChanged, needsEthicsReview } from '../../shared/audit';
 import { getScenes, replaceScene, sceneElements } from '../../shared/screenplay';
 import { diffElements, summarizeDiff, type DiffOp } from '../../shared/diff';
 import { api } from '../api';
@@ -43,6 +44,12 @@ export function Review({ proposalId }: { proposalId: string | null }) {
 
   const stale = selected && scene && selected.status !== 'accepted' && !sameScene(current, selected.original);
   const changedSinceAccept = selected && scene && selected.status === 'accepted' && !sameScene(current, selected.revised);
+  // 【확정】 요소를 바꾼 수정안은 채택할 수 없다 (서버도 막는다)
+  const lockedBroken = selected && scene && selected.status !== 'accepted' ? lockedChanged(current, selected.revised, project.elementMarks) : [];
+  // 수위·재현 태그나 수위 메모가 있는 장면은 ETH 검수가 필요하다
+  const ethRequired = Boolean(selected && scene && needsEthicsReview(project, selected.sceneId));
+  const ethMissing = ethRequired && !selected?.reviews.some((r) => r.role === 'ETH');
+  const highRisk = selected?.reviews.filter((r) => r.risk === 'high') ?? [];
 
   const setStatus = async (p: Proposal, status: ProposalStatus) => {
     const saved = await api.setProposalStatus(p.id, status);
@@ -51,12 +58,14 @@ export function Review({ proposalId }: { proposalId: string | null }) {
 
   const accept = async () => {
     if (!selected || !scene) return;
+    if (ethMissing && !confirm('이 장면은 윤리·수위 검수(ETH)가 필요합니다. 검수 없이 채택할까요?')) return;
+    if (highRisk.length && !confirm(`${highRisk.map((r) => REVIEW_ROLE_LABEL[r.role]).join(', ')} 검수에서 위험도 '상'이 나왔습니다. 그래도 채택할까요?`)) return;
     setBusy(true);
     try {
       await flush();
-      await api.createSnapshot(project.id, `수정안 채택 전 · S#${scene.number}`, `"${selected.title}" 채택 직전의 원고`);
-      update((p) => ({ elements: replaceScene(p.elements, selected.sceneId, selected.revised) }));
+      await api.createSnapshot(project.id, `수정안 채택 전 · S#${scene.label}`, `"${selected.title}" 채택 직전의 원고`);
       await setStatus(selected, 'accepted');
+      update((p) => ({ elements: replaceScene(p.elements, selected.sceneId, selected.revised) }));
       announce('수정안을 원고에 반영했습니다. 채택 직전 원고는 작업본에 저장했습니다.');
     } catch (e) {
       announce(e instanceof Error ? e.message : '수정안을 반영하지 못했습니다.');
@@ -94,7 +103,7 @@ export function Review({ proposalId }: { proposalId: string | null }) {
                 <span className={`status status-${p.status}`}>{STATUS_LABEL[p.status]}</span>
                 <strong>{p.title || '장면 수정안'}</strong>
                 <span className="muted small">
-                  {s ? `S#${s.number} ${s.parts.location}` : '삭제된 장면'} · {timeAgo(p.createdAt)}
+                  {s ? `S#${s.label} ${s.parts.location}` : '삭제된 장면'} · {timeAgo(p.createdAt)}
                 </span>
               </button>
             );
@@ -108,7 +117,7 @@ export function Review({ proposalId }: { proposalId: string | null }) {
                 <p className="eyebrow">REVISION REVIEW</p>
                 <h1>{selected.title || '장면 수정안'}</h1>
                 <p className="muted">
-                  {scene ? `S#${scene.number} ${scene.parts.location}` : '삭제된 장면'}
+                  {scene ? `S#${scene.label} ${scene.parts.location}` : '삭제된 장면'}
                   {selected.instruction && ` · 요청: ${selected.instruction}`}
                 </p>
               </div>
@@ -139,10 +148,43 @@ export function Review({ proposalId }: { proposalId: string | null }) {
               </p>
             )}
 
+            {lockedBroken && lockedBroken.length > 0 && (
+              <p className="banner banner-warn" role="alert">
+                <CircleAlert aria-hidden="true" />
+                이 수정안은 작가 확정 표현 {lockedBroken.length}곳을 바꿉니다 (예: “{lockedBroken[0].text.slice(0, 40)}”). 확정을 풀거나 수정안을 다시 받아야 채택할 수 있습니다.
+              </p>
+            )}
+
             <div className="diff-grid">
               <DiffColumn label="현재 원고" note={selected.status === 'accepted' ? '채택 전' : '작업본'} ops={ops} side="a" />
               <DiffColumn label="AI 수정안" note={STATUS_LABEL[selected.status]} ops={ops} side="b" />
             </div>
+
+            {ethMissing && selected.status !== 'accepted' && (
+              <p className="banner banner-warn">
+                <ShieldAlert aria-hidden="true" />
+                수위·재현 표시가 있는 장면입니다. 채택하기 전에 윤리·수위(ETH) 검수를 받아 주세요.
+              </p>
+            )}
+
+            <ProposalReport
+              proposal={selected}
+              onRaise={(text) => {
+                update((p) => ({ openQuestions: [...p.openQuestions, text] }));
+                announce('열린 질문에 올렸습니다. 판정이 나면 작품 바이블의 판정서에 적어 주세요.');
+              }}
+            />
+
+            <RoleReviews
+              key={selected.id}
+              proposal={selected}
+              recommended={ethRequired ? ['STRUCT', 'ETH'] : ['STRUCT']}
+              onSaved={(saved) => setProposals((list) => list?.map((x) => (x.id === saved.id ? saved : x)) ?? null)}
+              onRaise={(text) => {
+                update((p) => ({ openQuestions: [...p.openQuestions, text] }));
+                announce('열린 질문에 올렸습니다.');
+              }}
+            />
 
             <div className="review-bottom">
               <div>
@@ -170,7 +212,7 @@ export function Review({ proposalId }: { proposalId: string | null }) {
                   <>
                     {selected.status !== 'rejected' && <button onClick={() => void setStatus(selected, 'rejected')}>거절</button>}
                     {selected.status !== 'held' && <button onClick={() => void setStatus(selected, 'held')}>보류</button>}
-                    <button className="primary" disabled={busy || !scene} onClick={() => void accept()}>
+                    <button className="primary" disabled={busy || !scene || Boolean(lockedBroken?.length)} onClick={() => void accept()}>
                       {busy ? '반영 중…' : '수정안 채택'}
                     </button>
                   </>
@@ -207,5 +249,256 @@ export function DiffColumn({ label, note, ops, side }: { label: string; note: st
         })}
       </div>
     </article>
+  );
+}
+
+const ISSUE_LABEL: Record<OpenIssueKind, string> = {
+  ruling: '판정 요청 (D-후보)',
+  research: '고증 확인',
+  consultant: '컨설턴트 검토',
+  conflict: '상위 규칙과 충돌',
+};
+
+const CARD_ROWS: [keyof Proposal['sceneCard'], string][] = [
+  ['pov', '시점 인물'],
+  ['goal', '목표'],
+  ['obstacle', '장애'],
+  ['outcome', '결과'],
+  ['setups', '셋업 / 회수'],
+  ['ratingNote', '수위·재현'],
+  ['research', '고증'],
+];
+
+const LINK_LABEL = { therefore: '그래서', but: '그러나', andthen: '그리고 나서' } as const;
+const TURN_LABEL = { action: '행동', revelation: '폭로' } as const;
+
+/** 수정안 작성 과정: 인용 근거 → 장면 카드 → 반클리셰 → 자기 검수·코드 점검 → 미결 쟁점 */
+function ProposalReport({ proposal, onRaise }: { proposal: Proposal; onRaise: (text: string) => void }) {
+  const p = proposal;
+  const fails = p.selfReview.filter((r) => !r.pass).length + p.audit.filter((f) => f.level === 'fail').length;
+  const card = p.sceneCard;
+  if (!p.selfReview.length && !p.quotes.length && !p.audit.length) return null;
+  return (
+    <details className="proposal-report" open={fails > 0 || p.openIssues.length > 0}>
+      <summary>
+        작성 과정과 검수 — 검수 FAIL {fails}
+        {p.rewrites > 0 && ` · 자기 검수 뒤 ${p.rewrites}번 다시 씀`}
+        {p.openIssues.length > 0 && ` · 미결 쟁점 ${p.openIssues.length}`}
+      </summary>
+      <div className="report-grid">
+        {p.quotes.length > 0 && (
+          <section>
+            <h3>근거로 인용한 판정·규칙</h3>
+            {p.quotes.map((q, i) => (
+              <blockquote key={i}>
+                <strong>{q.source}</strong> {q.text}
+              </blockquote>
+            ))}
+          </section>
+        )}
+        <section>
+          <h3>장면 카드</h3>
+          <dl className="card-dl">
+            {(card.valueStart || card.valueEnd) && (
+              <div className="dl-row">
+                <dt>가치 전환</dt>
+                <dd>
+                  {card.valueStart} → {card.valueEnd}
+                  {card.turnBy && ` (${TURN_LABEL[card.turnBy]})`}
+                </dd>
+              </div>
+            )}
+            {card.link && (
+              <div className="dl-row">
+                <dt>직전 장면과</dt>
+                <dd className={card.link === 'andthen' ? 'fail-text' : undefined}>{LINK_LABEL[card.link]}</dd>
+              </div>
+            )}
+            {CARD_ROWS.filter(([k]) => card[k]).map(([k, label]) => (
+              <div key={k} className="dl-row">
+                <dt>{label}</dt>
+                <dd>{String(card[k])}</dd>
+              </div>
+            ))}
+          </dl>
+          {p.antiCliche.length > 0 && (
+            <>
+              <h3>피한 흔한 처리</h3>
+              <ol className="small">
+                {p.antiCliche.map((c, i) => (
+                  <li key={i}>{c}</li>
+                ))}
+              </ol>
+            </>
+          )}
+        </section>
+        <section className="span-2">
+          <h3>검수</h3>
+          <ul className="plain-list findings">
+            {p.audit.map((f, i) => (
+              <li key={`a${i}`} className={`finding finding-${f.level}`}>
+                {f.level === 'fail' ? <CircleAlert aria-hidden="true" /> : <TriangleAlert aria-hidden="true" />}
+                <span className="code">{f.code}</span> 코드 점검 · {f.message}
+              </li>
+            ))}
+            {p.selfReview.map((r) => (
+              <li key={r.code} className={`finding ${r.pass ? 'finding-pass' : 'finding-fail'}`}>
+                {r.pass ? <CircleCheck aria-hidden="true" /> : <CircleAlert aria-hidden="true" />}
+                <span className="code">{r.code}</span> {r.note}
+              </li>
+            ))}
+          </ul>
+        </section>
+        {p.openIssues.length > 0 && (
+          <section className="span-2">
+            <h3>미결 쟁점</h3>
+            <ul className="plain-list">
+              {p.openIssues.map((o, i) => (
+                <li key={i} className="row">
+                  <span>
+                    <span className="tag">{ISSUE_LABEL[o.kind]}</span> {o.text}
+                  </span>
+                  <button className="small-btn" onClick={() => onRaise(`${o.kind === 'ruling' ? 'D-후보: ' : `${ISSUE_LABEL[o.kind]}: `}${o.text}`)}>
+                    열린 질문에 올리기
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+        {p.changeLog && (
+          <section className="span-2">
+            <h3>변경 로그</h3>
+            <p className="small pre">{p.changeLog}</p>
+          </section>
+        )}
+      </div>
+    </details>
+  );
+}
+
+const RISK_LABEL: Record<RiskLevel, string> = { high: '상', mid: '중', low: '하' };
+
+/** 역할 검수: 수정안을 쓴 AI와 대화를 공유하지 않는 검수자가 판정만 한다 */
+function RoleReviews({
+  proposal,
+  recommended,
+  onSaved,
+  onRaise,
+}: {
+  proposal: Proposal;
+  recommended: ReviewRole[];
+  onSaved: (p: Proposal) => void;
+  onRaise: (text: string) => void;
+}) {
+  const [running, setRunning] = useState<ReviewRole | null>(null);
+  const [error, setError] = useState('');
+  const [open, setOpen] = useState<ReviewRole | null>(null);
+  const announce = useAnnounce();
+  const done = new Map(proposal.reviews.map((r) => [r.role, r]));
+  const shown = (open && done.get(open)) || proposal.reviews[proposal.reviews.length - 1];
+
+  const run = async (role: ReviewRole) => {
+    setRunning(role);
+    setError('');
+    try {
+      const saved = await api.reviewProposal(proposal.id, role);
+      onSaved(saved);
+      setOpen(role);
+      announce(`${REVIEW_ROLE_LABEL[role]} 검수가 끝났습니다.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '검수하지 못했습니다.');
+    } finally {
+      setRunning(null);
+    }
+  };
+
+  return (
+    <section className="role-reviews" aria-labelledby="role-reviews-title">
+      <div className="row">
+        <h2 id="role-reviews-title">역할 검수</h2>
+        <span className="muted small">검수자는 같은 문서를 새로 읽고 판정만 합니다. 원고는 바꾸지 않습니다. 검수 1회 = AI 호출 1회.</span>
+      </div>
+      <div className="role-buttons" role="group" aria-label="검수 역할">
+        {REVIEW_ROLES.map((role) => {
+          const r = done.get(role);
+          const rec = recommended.includes(role) && !r;
+          return (
+            <button
+              key={role}
+              className={`small-btn${rec ? ' recommended' : ''}${shown?.role === role ? ' on' : ''}`}
+              disabled={running !== null}
+              aria-pressed={shown?.role === role}
+              onClick={() => (r ? setOpen(role) : void run(role))}
+              title={r ? '검수 결과 보기' : '검수 실행'}
+            >
+              <span className="code">{role}</span> {REVIEW_ROLE_LABEL[role]}
+              {r && <span className={`risk risk-${r.risk}`}>{RISK_LABEL[r.risk]}</span>}
+              {rec && <span className="muted small">권장</span>}
+              {running === role && ' …'}
+            </button>
+          );
+        })}
+      </div>
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      {running && (
+        <p className="muted small" aria-live="polite">
+          {REVIEW_ROLE_LABEL[running]} 검수자가 읽는 중… (1분 정도 걸릴 수 있어요)
+        </p>
+      )}
+      {shown && (
+        <article className="role-review">
+          <div className="row">
+            <strong>
+              {shown.role} {REVIEW_ROLE_LABEL[shown.role]} · 위험도 {RISK_LABEL[shown.risk]}
+            </strong>
+            <span className="row tight">
+              <span className="muted small">{timeAgo(shown.createdAt)}</span>
+              <button className="small-btn" disabled={running !== null} onClick={() => void run(shown.role)}>
+                다시 검수
+              </button>
+            </span>
+          </div>
+          <p>{shown.summary}</p>
+          <ul className="plain-list findings">
+            {shown.verdicts.map((v) => (
+              <li key={v.code} className={`finding ${v.pass ? 'finding-pass' : 'finding-fail'}`}>
+                {v.pass ? <CircleCheck aria-hidden="true" /> : <CircleAlert aria-hidden="true" />}
+                <span className="code">{v.code}</span> {v.note}
+              </li>
+            ))}
+          </ul>
+          {shown.suggestions.length > 0 && (
+            <>
+              <h3>고칠 방향</h3>
+              <ul className="small">
+                {shown.suggestions.map((s, i) => (
+                  <li key={i}>{s}</li>
+                ))}
+              </ul>
+            </>
+          )}
+          {shown.consultantItems.length > 0 && (
+            <>
+              <h3>컨설턴트에게 확인할 것</h3>
+              <ul className="plain-list">
+                {shown.consultantItems.map((c, i) => (
+                  <li key={i} className="row">
+                    <span className="small">{c}</span>
+                    <button className="small-btn" onClick={() => onRaise(`컨설턴트 검토: ${c}`)}>
+                      열린 질문에 올리기
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </article>
+      )}
+    </section>
   );
 }

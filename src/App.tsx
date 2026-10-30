@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { FileClock, FilePenLine, GitCompareArrows, LayoutGrid, PanelsTopLeft, ChartColumn } from 'lucide-react';
+import { FileClock, FilePenLine, GitCompareArrows, LayoutGrid, PanelsTopLeft, ChartColumn, Languages, ScrollText } from 'lucide-react';
 import type { Project } from '../shared/types';
 import { api } from './api';
 import { ProjectProvider, useProject, type SaveState } from './state';
@@ -10,6 +10,8 @@ import { Board } from './views/Board';
 import { Review } from './views/Review';
 import { Drafts } from './views/Drafts';
 import { Reports } from './views/Reports';
+import { Bible } from './views/Bible';
+import { Parallel } from './views/Parallel';
 import { PrintView } from './views/PrintView';
 import { AccountMenu } from './Auth';
 
@@ -18,6 +20,8 @@ const NAV: { view: View; label: string; icon: typeof LayoutGrid }[] = [
   { view: 'write', label: '집필', icon: FilePenLine },
   { view: 'review', label: '수정안 검토', icon: GitCompareArrows },
   { view: 'drafts', label: '작업본', icon: FileClock },
+  { view: 'bible', label: '작품 바이블', icon: ScrollText },
+  { view: 'parallel', label: '영문 병행본', icon: Languages },
   { view: 'reports', label: '리포트 · 설정', icon: ChartColumn },
 ];
 
@@ -182,6 +186,8 @@ function ProjectShell({ status }: { status: string }) {
         {route.view === 'board' && <Board />}
         {route.view === 'review' && <Review proposalId={route.param} />}
         {route.view === 'drafts' && <Drafts />}
+        {route.view === 'bible' && <Bible />}
+        {route.view === 'parallel' && <Parallel />}
         {route.view === 'reports' && <Reports />}
       </main>
       <Footer status={status} />
