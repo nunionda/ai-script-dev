@@ -332,6 +332,7 @@ export const LockGuard = Extension.create<LockGuardOptions>({
     const editor = this.editor;
     // React 상태가 갱신되기 전 다음 입력에서 다시 묻지 않도록
     const released = new Set<string>();
+    const declined = new Map<string, number>();
     return [
       new Plugin({
         filterTransaction: (tr, state) => {
@@ -351,11 +352,15 @@ export const LockGuard = Extension.create<LockGuardOptions>({
           });
           const changed = [...before].filter(([id, v]) => after.get(id) !== v).map(([id]) => id);
           if (!changed.length) return true;
-          if (confirm(`작가 확정 표현 ${changed.length}곳을 고칩니다. 확정을 풀고 편집할까요?`)) {
+          // 거절한 직후의 이어지는 입력(한글 조합 중 ㅎ→하→확정 등)은 다시 묻지 않고 막는다
+          const now = Date.now();
+          const recentlyDeclined = changed.every((id) => now - (declined.get(id) ?? 0) < 1500);
+          if (!recentlyDeclined && confirm(`작가 확정 표현 ${changed.length}곳을 고칩니다. 확정을 풀고 편집할까요?`)) {
             changed.forEach((id) => released.add(id));
             onUnlock(changed);
             return true;
           }
+          changed.forEach((id) => declined.set(id, Date.now()));
           // 입력이 이미 화면(DOM)에 반영된 경우 상태대로 다시 그린다
           setTimeout(() => {
             if (!editor.isDestroyed) editor.view.dispatch(editor.state.tr.setMeta(layoutKey, true));

@@ -174,3 +174,22 @@ describe('snapshots, comments, proposals', () => {
     expect((await call('GET', '/nope')).status).toBe(404);
   });
 });
+
+describe('session summary guard', () => {
+  it('keeps only decisions quoted from the writer', async () => {
+    const { checkDecisions } = await import('./agents');
+    const out = checkDecisions(
+      {
+        decisions: [
+          { text: '세영은 끝까지 사과하지 않는다.', quote: '세영은 끝까지 사과 안 해' },
+          { text: '결말은 열린 결말로 한다.', quote: '열린 결말이 좋겠습니다' },
+          { text: '빈 근거', quote: '' },
+        ],
+        open: ['소품 고증'],
+      },
+      ['음… 세영은 끝까지 사과 안 해. 그걸로 가자.', '결말은 어떻게 할까?'],
+    );
+    expect(out.decisions).toEqual(['세영은 끝까지 사과하지 않는다.']);
+    expect(out.open).toEqual(['소품 고증', '(작가 확인 필요) 결말은 열린 결말로 한다.', '(작가 확인 필요) 빈 근거']);
+  });
+});

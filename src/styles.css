@@ -1715,6 +1715,10 @@ p.banner {
 .session-summary {
   display: grid;
   gap: 6px;
+  /* 좁은 패널에서 대화 기록을 밀어내지 않게 */
+  max-height: 40vh;
+  overflow-y: auto;
+  flex: none;
   margin: 8px 0;
   padding: 10px 12px;
   border: 1px solid var(--line);

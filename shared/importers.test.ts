@@ -106,6 +106,45 @@ describe('import', () => {
     ]);
   });
 
+  it('reads a Word script without blank lines, with acts and an appendix after it', async () => {
+    const p = (t: string, style?: string) => `<w:p>${style ? `<w:pPr><w:pStyle w:val="${style}"/></w:pPr>` : ''}<w:r><w:t>${t}</w:t></w:r></w:p>`;
+    const doc =
+      '<w:document xmlns:w="w"><w:body>' +
+      p('로봇씨드', 'Title') + p('1막 떠나온 세계', 'Heading1') +
+      p('01  외부 그린타워필드 낮', 'Heading2') + p('베티가 지나간다.') + p('스텔라') + p('공주님!') + p('베티는 숨는다.') + p('베티') + p('안녕.') + p('스텔라') + p('어디 가요?') +
+      p('2막 선택', 'Heading1') + p('02  내부 코어실 밤', 'Heading2') + p('코어가 빛난다.') + p('03  외부 다리 밤', 'Heading2') + p('바람.') +
+      p('장면 대조표', 'Heading1') + p('01 외부 그린타워필드 낮 유지') + p('02 내부 코어실 밤 압축') + p('03 외부 다리 밤 신설') +
+      '</w:body></w:document>';
+    const r = fromParagraphs(await docxParagraphs(deflatedZip({ 'word/document.xml': doc })));
+    expect(r.acts.map((a) => a.title)).toEqual(['1막 떠나온 세계', '2막 선택']);
+    expect(r.elements.filter((e) => e.type === 'scene').map((e) => e.text)).toEqual(['외부 그린타워필드 낮', '내부 코어실 밤', '외부 다리 밤']);
+    expect(shape(r.elements.slice(0, 9))).toEqual([
+      ['scene', '외부 그린타워필드 낮'],
+      ['action', '베티가 지나간다.'],
+      ['character', '스텔라'],
+      ['dialogue', '공주님!'],
+      ['action', '베티는 숨는다.'],
+      ['character', '베티'],
+      ['dialogue', '안녕.'],
+      ['character', '스텔라'],
+      ['dialogue', '어디 가요?'],
+    ]);
+    const scenes = r.elements.filter((e) => e.type === 'scene');
+    expect(r.sceneMeta[scenes[0].id]?.act).toBe(r.acts[0].id);
+    expect(r.sceneMeta[scenes[1].id]?.act).toBe(r.acts[1].id);
+  });
+
+  it('keeps table paragraphs out of the script', async () => {
+    const doc =
+      '<w:document xmlns:w="w"><w:body>' +
+      '<w:p><w:r><w:t>S#1. 내부. 방 - 밤</w:t></w:r></w:p><w:p><w:r><w:t>창문이 열린다.</w:t></w:r></w:p>' +
+      '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>S#9. 외부. 표 안 - 낮</w:t></w:r></w:p></w:tc></w:tr></w:tbl>' +
+      '</w:body></w:document>';
+    const r = fromParagraphs(await docxParagraphs(deflatedZip({ 'word/document.xml': doc })));
+    expect(shape(r.elements)).toEqual([['scene', '내부. 방 - 밤'], ['action', '창문이 열린다.']]);
+    expect(r.preface).toContain('S#9. 외부. 표 안 - 낮');
+  });
+
   it('classifies plain Korean and Hollywood text', () => {
     const ko = fromText('S#3. 외부. 골목 - 새벽\n\n서윤이 걷는다.\n\n동하\n(멀리서)\n서윤아!\n\n12 INT. HOUSE - DAY 12\n');
     expect(shape(ko.elements)).toEqual([

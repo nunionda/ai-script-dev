@@ -1,5 +1,5 @@
 import type { ElementType, ScriptElement } from './types';
-import { el } from './screenplay';
+import { el, uid } from './screenplay';
 import { fromFountain, type ImportedScript } from './fountain';
 
 /*
@@ -16,6 +16,8 @@ export interface Paragraph {
   indent?: number;
   /** 오른쪽 정렬 (PDF) */
   right?: boolean;
+  /** 표 안의 문단 — 원고가 아니라 부록·장면 대조표 등으로 본다 */
+  table?: boolean;
 }
 
 export interface ImportResult extends ImportedScript {
@@ -105,6 +107,17 @@ export async function docxParagraphs(data: Uint8Array): Promise<Paragraph[]> {
   }
   const body = xml.slice(xml.indexOf('<w:body'));
   const out: Paragraph[] = [];
+  // 표(<w:tbl>) 범위
+  const tables: [number, number][] = [];
+  const stack: number[] = [];
+  for (const t of body.matchAll(/<(\/?)w:tbl[\s>]/g)) {
+    if (!t[1]) stack.push(t.index!);
+    else if (stack.length) {
+      const start = stack.pop()!;
+      if (!stack.length) tables.push([start, t.index!]);
+    }
+  }
+  const inTable = (at: number) => tables.some(([a, b]) => at > a && at < b);
   for (const m of body.matchAll(/<w:p\b[^>]*?(?:\/>|>([\s\S]*?)<\/w:p>)/g)) {
     const inner = m[1] ?? '';
     const styleId = inner.match(/<w:pStyle w:val="([^"]+)"/)?.[1];
@@ -113,7 +126,7 @@ export async function docxParagraphs(data: Uint8Array): Promise<Paragraph[]> {
       if (t[1] !== undefined) text += decodeEntities(t[1]);
       else text += t[0].startsWith('<w:tab') ? '\t' : '\n';
     }
-    out.push({ text, style: styleId ? (names.get(styleId) ?? styleId) : undefined });
+    out.push({ text, style: styleId ? (names.get(styleId) ?? styleId) : undefined, ...(inTable(m.index!) ? { table: true } : {}) });
   }
   return out;
 }
@@ -134,15 +147,18 @@ export async function hwpxParagraphs(data: Uint8Array): Promise<Paragraph[]> {
     // 표 안의 문단도 차례로 펼친다
     let cur: Paragraph | null = null;
     let inText = 0;
-    for (const m of xml.matchAll(/<(\/?)(?:\w+:)?(p|t|tab|lineBreak)\b([^>]*?)(\/?)>|([^<]+)/g)) {
+    let tableDepth = 0;
+    for (const m of xml.matchAll(/<(\/?)(?:\w+:)?(p|t|tab|lineBreak|tbl)\b([^>]*?)(\/?)>|([^<]+)/g)) {
       const [, close, tag, attrs, selfClose, text] = m;
       if (text !== undefined) {
         if (inText && cur) cur.text += decodeEntities(text);
         continue;
       }
-      if (tag === 'p' && !close) {
+      if (tag === 'tbl') {
+        if (!selfClose) tableDepth += close ? -1 : 1;
+      } else if (tag === 'p' && !close) {
         if (cur) out.push(cur);
-        cur = { text: '', style: names.get(attrs.match(/styleIDRef="(\d+)"/)?.[1] ?? '') };
+        cur = { text: '', style: names.get(attrs.match(/styleIDRef="(\d+)"/)?.[1] ?? ''), ...(tableDepth > 0 ? { table: true } : {}) };
       } else if (tag === 'p' && close) {
         if (cur) out.push(cur);
         cur = null;
@@ -286,13 +302,15 @@ export async function hwpParagraphs(data: Uint8Array): Promise<Paragraph[]> {
     for (let p = 0; p + 4 <= body.length; ) {
       const h = v.getUint32(p, true);
       const tag = h & 0x3ff;
+      const level = (h >>> 10) & 0x3ff;
       let size = h >>> 20;
       p += 4;
       if (size === 0xfff) {
         size = v.getUint32(p, true);
         p += 4;
       }
-      if (tag === HWPTAG_PARA_HEADER) out.push({ text: '' });
+      // 표 안의 문단은 한 단계 깊은 레벨에 온다
+      if (tag === HWPTAG_PARA_HEADER) out.push(level > 0 ? { text: '', table: true } : { text: '' });
       else if (tag === HWPTAG_PARA_TEXT && out.length) out[out.length - 1].text = paraText(body.subarray(p, p + size));
       p += size;
     }
@@ -318,6 +336,8 @@ const SCENE_RE = new RegExp(String.raw`^\s*(?:(?:S\s*#|씬|scene|#)\s*\d+(?:-\d+
 const SCENE_NUMBER_RE = new RegExp(String.raw`^\s*(?:(?:S\s*#|씬|scene|#)\s*\d+(?:-\d+|[A-Z])?\s*[.):]?\s*|\d+(?:-\d+|[A-Z])?(?:\s*[.)]\s*|\s+)(?=${PLACE}[.\s]))`, 'i');
 const TRANSITION_RE = /^(?:(?:CUT|SMASH CUT|MATCH CUT|DISSOLVE|FADE)(?: (?:TO|IN|OUT))?[:.]?|FADE (?:IN|OUT)[:.]?|.+ TO:|(?:컷|페이드\s?(?:인|아웃)|디졸브|암전|F\.?\s?[IO]\.?|O\.?L\.?|C\.?\s?I\.?|C\.?\s?O\.?)\s*[.:]?)$/i;
 const CUE_EXT = /\s*\((?:V\.?O\.?|O\.?S\.?|O\.?C\.?|E|F|CONT'D|소리|목소리|전화|이어서)\)\s*$/i;
+/** 막 제목: "1막 떠나온 세계", "제2막", "ACT II" */
+const ACT_RE = /^(?:제\s*)?\d+\s*막(?:\s|$|[.:])|^ACT\s+(?:[IVX]+|\d+)\b/i;
 /** "이름 : 대사", "이름: (괄호) 대사" — 한국 원고에서 흔한 형태 */
 const INLINE_DIALOGUE_RE = /^([가-힣A-Za-z0-9·]{1,12}(?: [가-힣A-Za-z0-9·]{1,10})?(?:\s?\((?:V\.?O\.?|O\.?S\.?|E|F|소리|목소리|전화)\))?)\s*[:：]\s*(?:(\([^)]*\))\s*)?(.+)$/;
 
@@ -335,23 +355,43 @@ function looksLikeCue(text: string, next: string | undefined): boolean {
 export function fromParagraphs(paras: Paragraph[]): ImportResult {
   const result: ImportResult = { title: '', author: '', contact: '', elements: [], acts: [], sceneMeta: {}, preface: '' };
   // 줄을 맞추려고 넣은 연속 공백은 하나로 (탭은 이름·대사 구분에 쓰므로 둔다)
-  const clean = paras.map((p) => ({ ...p, text: p.text.replace(/\r/g, '').replace(/\u00a0/g, ' ').replace(/ {2,}/g, ' ').replace(/[ \t]+$/gm, '') }));
+  // 표 안의 문단은 원고에서 빼고 참고 문서 쪽에 남긴다
+  const tableText = paras.filter((p) => p.table && p.text.trim()).map((p) => p.text.trim());
+  const clean = paras.filter((p) => !p.table).map((p) => ({ ...p, text: p.text.replace(/\r/g, '').replace(/\u00a0/g, ' ').replace(/ {2,}/g, ' ').replace(/[ \t]+$/gm, '') }));
   const styled = clean.filter((p) => p.style && STYLE_TYPE.some(([re]) => re.test(p.style!))).length;
   const useStyles = styled >= Math.max(3, clean.filter((p) => p.text.trim()).length * 0.3);
+  // 씬 헤딩처럼 보이는 줄 대부분이 한 스타일(예: "제목 2")이면, 그 스타일인 줄만 씬 헤딩으로 본다.
+  // 원고 뒤의 장면 대조표·메모처럼 번호로 시작하는 일반 문단을 장면으로 잘못 읽지 않게 한다.
+  const sceneLike = clean.filter((p) => SCENE_RE.test(p.text.trim()) && !p.text.trim().includes('\n'));
+  const styleCount = new Map<string, number>();
+  for (const p of sceneLike) if (p.style) styleCount.set(p.style, (styleCount.get(p.style) ?? 0) + 1);
+  const [topStyle, topCount] = [...styleCount].sort((a, b) => b[1] - a[1])[0] ?? ['', 0];
+  const sceneStyle = topCount >= 3 && topCount >= sceneLike.length * 0.4 ? topStyle : '';
+  const isSceneLine = (p: Paragraph) => SCENE_RE.test(p.text.trim()) && !p.text.trim().includes('\n') && (!sceneStyle || p.style === sceneStyle);
 
-  const firstScene = clean.findIndex((p) => {
+  let firstScene = clean.findIndex((p) => {
     if (useStyles && p.style) return STYLE_TYPE.find(([re]) => re.test(p.style!))?.[1] === 'scene';
-    return SCENE_RE.test(p.text.trim());
+    return isSceneLine(p);
   });
+  // 첫 장면 바로 위의 막 제목("1막 …")은 본문에 넣는다
+  for (let k = firstScene - 1; k >= 0 && (!clean[k].text.trim() || ACT_RE.test(clean[k].text.trim())); k--) {
+    if (clean[k].text.trim()) firstScene = k;
+  }
   const preface = firstScene > 0 ? clean.slice(0, firstScene) : [];
   const body = firstScene >= 0 ? clean.slice(firstScene) : clean;
   const prefaceLines = preface.map((p) => p.text.trim()).filter((t) => t && !/^\d+\.?$/.test(t));
   result.title = prefaceLines[0]?.slice(0, 200) ?? '';
-  result.preface = prefaceLines.join('\n');
+  result.preface = [prefaceLines.join('\n'), tableText.length ? `[표]\n${tableText.join('\n')}` : ''].filter(Boolean).join('\n\n');
 
+  let pendingAct: string | null = null;
   const push = (type: ElementType, text: string) => {
     const e = el(type, text);
     result.elements.push(e);
+    // 막 제목 바로 뒤의 장면이 그 막을 연다
+    if (type === 'scene' && pendingAct) {
+      result.sceneMeta[e.id] = { act: pendingAct };
+      pendingAct = null;
+    }
     return e;
   };
   const last = (): ScriptElement | undefined => result.elements[result.elements.length - 1];
@@ -360,6 +400,10 @@ export function fromParagraphs(paras: Paragraph[]): ImportResult {
     const h = t.replace(SCENE_NUMBER_RE, '').trim() || t.trim();
     return /^(INT|EXT|EST|I\/E)/i.test(h) ? h.replace(/\s+\d+[A-Z]?\.?$/, '') : h;
   };
+
+  // 빈 문단으로 요소 덩어리를 나누는 원고(이름↵대사↵대사↵빈 줄)인가, 문단 하나가 요소 하나인 원고인가
+  const nonBlank = body.filter((p) => p.text.trim()).length;
+  const blockMode = body.length - nonBlank >= nonBlank * 0.2;
 
   let inDialogue = false;
   for (let i = 0; i < body.length; i++) {
@@ -371,6 +415,14 @@ export function fromParagraphs(paras: Paragraph[]): ImportResult {
     }
     // 쪽 번호·머리말 흔적
     if (/^\d+\.?$/.test(text) || /^-\s*\d+\s*-$/.test(text) || /^\(?(MORE|계속)\)?$/i.test(text)) continue;
+    // 막 제목: "1막 …", "제2막", "ACT II"
+    if (ACT_RE.test(text) && text.length <= 60) {
+      const act = { id: uid('a'), title: text };
+      result.acts.push(act);
+      pendingAct = act.id;
+      inDialogue = false;
+      continue;
+    }
 
     if (useStyles && p.style) {
       const type = STYLE_TYPE.find(([re]) => re.test(p.style!))?.[1];
@@ -380,7 +432,7 @@ export function fromParagraphs(paras: Paragraph[]): ImportResult {
       }
     }
 
-    if (SCENE_RE.test(text) && !text.includes('\n')) {
+    if (isSceneLine(p)) {
       push('scene', heading(text));
       inDialogue = false;
       continue;
@@ -433,18 +485,28 @@ export function fromParagraphs(paras: Paragraph[]): ImportResult {
       inDialogue = false;
       continue;
     }
-    if (looksLikeCue(text, body[i + 1]?.text) && !inDialogue) {
+    // 대사 중에 이름 줄이 오면 다음 화자 (빈 줄 없이 이어 쓴 원고)
+    if (looksLikeCue(text, body[i + 1]?.text) && (!inDialogue || last()?.type === 'dialogue')) {
       push('character', text);
       inDialogue = true;
       continue;
     }
     if (inDialogue) {
-      if (/^\(.*\)$/s.test(text)) push('parenthetical', text);
-      else if (last()?.type === 'dialogue') last()!.text += `\n${text}`;
-      else push('dialogue', text);
-      continue;
+      const paren = /^\(.*\)$/s.test(text);
+      // 빈 줄로 덩어리를 나누지 않는 원고는 대사가 한 문단이다. 대사 다음 문단은 지문으로 본다
+      if (!blockMode && last()?.type === 'dialogue' && !paren) inDialogue = false;
+      else {
+        if (paren) push('parenthetical', text);
+        else if (last()?.type === 'dialogue') last()!.text += `\n${text}`;
+        else push('dialogue', text);
+        continue;
+      }
     }
     push('action', text);
+  }
+  if (result.acts.length) {
+    const first = result.elements.find((e) => e.type === 'scene');
+    if (first && !result.sceneMeta[first.id]?.act) (result.sceneMeta[first.id] ??= {}).act = result.acts[0].id;
   }
   return result;
 }

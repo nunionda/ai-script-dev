@@ -206,17 +206,45 @@ export async function auditStructure(project: Project, documents: ReferenceDocum
 // ---------------------------------------------------------------- 세션 요약
 
 const SummarySchema = z.object({
-  decisions: z.array(z.string()).describe('작가가 대화에서 분명히 정한 것 — 판정서 후보. 한 문장씩, 판정서 문체로'),
-  open: z.array(z.string()).describe('논의했지만 정하지 않은 것 — 열린 질문'),
+  decisions: z
+    .array(
+      z.object({
+        text: z.string().describe('판정서 문체의 한 문장'),
+        quote: z.string().describe('작가가 그렇게 정했다는 근거 — <writer> 메시지에서 그대로 옮긴 구절 (AI 문장 금지)'),
+      }),
+    )
+    .describe('작가가 자기 말로 분명히 정하거나 고른 것 — 판정서 후보'),
+  open: z.array(z.string()).describe('논의했지만 작가가 정하지 않은 것 — 열린 질문'),
 });
 
 const SUMMARY_INSTRUCTIONS = `<role>너는 시나리오 작업실의 작가 보조다. AI 대화 세션을 정리한다.</role>
 <rules>
-- decisions에는 작가(사용자)가 분명히 고르거나 확정한 것만 넣는다. AI가 제안만 하고 작가가 받아들이지 않은 것은 넣지 않는다.
+- 결정은 작가만 한다. decisions에는 <writer> 메시지에서 작가가 자기 말로 정하거나 고른 것만 넣는다.
+  예: "그걸로 하자", "B안으로 가", "세영은 끝까지 말하지 않는다" 같은 작가의 문장.
+- AI(<assistant>)가 제안·추천·정리만 했고 작가가 그 뒤에 받아들인다고 말하지 않은 것은 decisions가 아니라 open에 넣는다.
+- 질문("~할까?", "~는 어때?")은 결정이 아니다. open에 넣는다.
+- 각 decision의 quote에는 작가의 <writer> 메시지에서 근거 구절을 글자 그대로 옮긴다. 옮길 문장이 없으면 그 항목은 decision이 아니다.
 - 이미 판정서에 있는 내용은 다시 넣지 않는다.
-- open에는 결론 없이 남은 쟁점, 확인이 필요한 고증, 판정 요청(D-후보)을 넣는다.
+- open에는 결론 없이 남은 쟁점, AI의 미채택 제안, 확인이 필요한 고증, 판정 요청(D-후보)을 넣는다.
 - 각 항목은 대화를 안 본 사람도 이해할 수 있는 한 문장. 없으면 빈 배열.
 </rules>`;
+
+const squash = (s: string) => s.replace(/[\s"'“”‘’.,!?…~]/g, '');
+
+/** 결정 후보의 근거 인용이 실제 작가 메시지에 있는지 코드로 확인한다. 없으면 미결 사항으로 내린다. */
+export function checkDecisions(parsed: { decisions: { text: string; quote: string }[]; open: string[] }, writerMessages: string[]): ChatSummary {
+  const writer = writerMessages.map(squash).join('\n');
+  const decisions: string[] = [];
+  const open = parsed.open.map((s) => s.trim()).filter(Boolean);
+  for (const d of parsed.decisions) {
+    const text = d.text.trim();
+    if (!text) continue;
+    const quote = squash(d.quote);
+    if (quote.length >= 2 && writer.includes(quote)) decisions.push(text);
+    else open.push(`(작가 확인 필요) ${text}`);
+  }
+  return { decisions, open };
+}
 
 export async function summarizeChat(project: Project, documents: ReferenceDocument[], history: ChatMessage[], signal?: AbortSignal): Promise<ChatSummary> {
   if (!history.length) throw new AiError(400, '정리할 대화가 없습니다.');
@@ -227,8 +255,10 @@ export async function summarizeChat(project: Project, documents: ReferenceDocume
     [{ role: 'user', content: `<transcript>\n${transcript}\n</transcript>\n\n<task>이 대화를 결정 후보와 미결 사항으로 정리하세요.</task>` }],
     { maxTokens: 4000, effort: 'low', refusal: '대화를 정리할 수 없다는 응답을 받았습니다.', signal },
   );
-  const clean = (xs: string[]) => xs.map((s) => s.trim()).filter(Boolean);
-  return { decisions: clean(parsed.decisions), open: clean(parsed.open) };
+  return checkDecisions(
+    parsed,
+    history.filter((m) => m.role === 'user').map((m) => m.content),
+  );
 }
 
 // ---------------------------------------------------------------- 영문 병행본

@@ -91,6 +91,8 @@ function TranslationStatus() {
   const [source, setSource] = useState<Project | null | undefined>(undefined);
   const [running, setRunning] = useState<string | null>(null);
   const [queue, setQueue] = useState<string[]>([]);
+  /** 일괄 번역 진행: 끝난 장면 수 / 전체 */
+  const [batch, setBatch] = useState<{ done: number; total: number } | null>(null);
   const [error, setError] = useState('');
   const [open, setOpen] = useState<string | null>(null);
   const announce = useAnnounce();
@@ -160,8 +162,13 @@ function TranslationStatus() {
     // 번역을 시작하기 전에 꺼내 둔다 — 끝난 직후 같은 장면을 다시 집지 않도록
     setQueue(rest);
     void translate(next).then((ok) => {
-      if (!ok) setQueue([]);
-      else if (!rest.length) announce('일괄 번역을 마쳤습니다.');
+      if (!ok) {
+        setQueue([]);
+        setBatch(null);
+      } else if (!rest.length) {
+        setBatch(null);
+        announce('일괄 번역을 마쳤습니다.');
+      } else setBatch((b) => b && { ...b, done: b.done + 1 });
     });
   }, [queue, running, translate, announce]);
 
@@ -206,13 +213,14 @@ function TranslationStatus() {
           </button>
           <button
             className="primary"
-            disabled={!pending.length || running !== null || queue.length > 0}
+            disabled={!pending.length || running !== null || batch !== null}
             onClick={() => {
               if (pending.some(editedSince) && !confirm('갱신할 장면 가운데 병행본에서 고친 장면이 있습니다. 다시 번역하면 그 수정이 사라집니다. 계속할까요?')) return;
+              setBatch({ done: 0, total: pending.length });
               setQueue(pending);
             }}
           >
-            {queue.length ? `번역 중… 남은 장면 ${queue.length}` : `미번역·갱신 필요 ${pending.length}장면 번역`}
+            {batch ? `번역 중… ${batch.done + 1}/${batch.total}` : `미번역·갱신 필요 ${pending.length}장면 번역`}
           </button>
         </div>
       </div>
@@ -257,7 +265,7 @@ function TranslationStatus() {
                     </td>
                     <td className="row tight">
                       {r.state !== 'omitted' && (
-                        <button className="small-btn" disabled={running !== null || queue.length > 0} onClick={() => ask(r.sourceSceneId)}>
+                        <button className="small-btn" disabled={running !== null || batch !== null} onClick={() => ask(r.sourceSceneId)}>
                           {running === r.sourceSceneId ? '번역 중…' : r.state === 'untranslated' || r.state === 'missing' ? '번역' : '다시 번역'}
                         </button>
                       )}
