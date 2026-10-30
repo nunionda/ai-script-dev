@@ -14,6 +14,7 @@ import { ScriptEditor, type CursorInfo } from '../editor/ScriptEditor';
 import { focusElement, setElementType } from '../editor/extensions';
 import { SceneNav } from '../components/SceneNav';
 import { AiPanel } from '../components/AiPanel';
+import { MarkBar } from '../components/MarkBar';
 import { Modal, download, projectPath, safeFilename, useAnnounce } from '../ui';
 
 export function Writer({ sceneParam }: { sceneParam: string | null }) {
@@ -43,7 +44,19 @@ export function Writer({ sceneParam }: { sceneParam: string | null }) {
       .catch(() => setAiConfigured(null));
   }, [project.id, loadComments]);
 
-  const scenes = useMemo(() => getScenes(project), [project.elements, project.acts, project.sceneMeta]);
+  const scenes = useMemo(
+    () => getScenes(project),
+    [project.elements, project.acts, project.sceneMeta, project.numberingLocked, project.format],
+  );
+  const layout = useMemo(
+    () => ({
+      sceneMeta: project.sceneMeta,
+      numberingLocked: project.numberingLocked,
+      marks: project.elementMarks,
+      tagNames: new Map(project.tagCategories.map((c) => [c.id, c.name])),
+    }),
+    [project.sceneMeta, project.numberingLocked, project.elementMarks, project.tagCategories],
+  );
   const pagination = useMemo(() => paginate(project.elements), [project.elements]);
   const currentScene = scenes.find((s) => s.id === cursor?.sceneId) ?? null;
 
@@ -96,7 +109,7 @@ export function Writer({ sceneParam }: { sceneParam: string | null }) {
 
   const extraCharacters = useMemo(() => Object.keys(project.characters), [project.characters]);
   const currentPage = cursor ? pagination.pageOf.get(cursor.elementId) : undefined;
-  const sceneLabel = currentScene ? `${project.format === 'korean' ? 'S#' : '#'}${currentScene.number} ${currentScene.parts.location || ''}`.trim() : '작품 전체';
+  const sceneLabel = currentScene ? `${project.format === 'korean' ? 'S#' : '#'}${currentScene.label} ${currentScene.parts.location || ''}`.trim() : '작품 전체';
 
   const exportAs = async (kind: 'fountain' | 'fdx' | 'docx' | 'pdf') => {
     setExportOpen(false);
@@ -200,9 +213,11 @@ export function Writer({ sceneParam }: { sceneParam: string | null }) {
         <section className="manuscript" aria-label="원고">
           <div className="paper-tools">
             <span>시나리오 · {project.format === 'korean' ? '한국식 서식' : '할리우드 서식'}</span>
-            <span>
-              {cursor ? ELEMENT_INFO[cursor.type].label : ''} · Enter 다음 요소 · Tab 요소 바꾸기
-            </span>
+            {cursor?.elementId ? (
+              <MarkBar elementId={cursor.elementId} />
+            ) : (
+              <span>Enter 다음 요소 · Tab 요소 바꾸기</span>
+            )}
           </div>
           <article className={`paper paper-${paper} format-${project.format}`}>
             <div className="page-number">
@@ -211,6 +226,7 @@ export function Writer({ sceneParam }: { sceneParam: string | null }) {
             <ScriptEditor
               initial={project.elements}
               format={project.format}
+              layout={layout}
               extraCharacters={extraCharacters}
               onChange={onChange}
               onCursor={onCursor}

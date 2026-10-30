@@ -3,8 +3,9 @@ import Document from '@tiptap/extension-document';
 import { Plugin, PluginKey, TextSelection, type EditorState, type Transaction } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import type { Node as PMNode } from '@tiptap/pm/model';
-import type { ElementType, ScriptElement, ScriptFormat } from '../../shared/types';
-import { ELEMENT_INFO, EMPTY_ENTER, ENTER_NEXT, SHIFT_TAB_NEXT, TAB_NEXT, uid } from '../../shared/screenplay';
+import type { ElementMark, ElementType, SceneMeta, ScriptElement, ScriptFormat } from '../../shared/types';
+import { ELEMENT_INFO, EMPTY_ENTER, ENTER_NEXT, SHIFT_TAB_NEXT, TAB_NEXT, sceneLabels, uid } from '../../shared/screenplay';
+import { STAGE_LABEL } from '../../shared/audit';
 import { paginate } from '../../shared/pagination';
 
 export const ScriptDocument = Document.extend({ content: 'element+' });
@@ -206,15 +207,37 @@ export const UniqueIds = Extension.create({
 
 export const layoutKey = new PluginKey<DecorationSet>('screenplayLayout');
 
-export interface LayoutOptions {
-  getFormat: () => ScriptFormat;
+/** 장면 번호·요소 표시를 그리는 데 필요한 작품 정보 */
+export interface LayoutContext {
+  format: ScriptFormat;
+  sceneMeta: Record<string, SceneMeta>;
+  numberingLocked: boolean;
+  marks: Record<string, ElementMark>;
+  /** 태그 분류 id → 이름 */
+  tagNames: Map<string, string>;
 }
 
-function buildDecorations(doc: PMNode, format: ScriptFormat): DecorationSet {
+export interface LayoutOptions {
+  getContext: () => LayoutContext;
+}
+
+function markLabel(mark: ElementMark | undefined, tagNames: Map<string, string>): string {
+  if (!mark) return '';
+  return [
+    mark.locked ? '확정' : '',
+    mark.play ? '극중극' : '',
+    ...(mark.tags ?? []).map((t) => `${tagNames.get(t.cat) ?? '?'}${t.stage ? `·${STAGE_LABEL[t.stage]}` : ''}`),
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+function buildDecorations(doc: PMNode, ctx: LayoutContext): DecorationSet {
+  const { format } = ctx;
   const elements = docToElements(doc);
+  const labels = sceneLabels({ elements, acts: [], sceneMeta: ctx.sceneMeta, numberingLocked: ctx.numberingLocked, format });
   const { breaks } = paginate(elements);
   const decos: Decoration[] = [];
-  let sceneNo = 0;
   doc.forEach((node, offset) => {
     const id = node.attrs.id as string;
     const page = id ? breaks.get(id) : undefined;
@@ -235,10 +258,18 @@ function buildDecorations(doc: PMNode, format: ScriptFormat): DecorationSet {
         ),
       );
     }
+    const attrs: Record<string, string> = {};
     if (node.attrs.type === 'scene') {
-      sceneNo++;
-      decos.push(Decoration.node(offset, offset + node.nodeSize, { 'data-scene-number': format === 'korean' ? `S#${sceneNo}.` : String(sceneNo) }));
+      const label = labels.get(id) ?? '';
+      attrs['data-scene-number'] = format === 'korean' ? `S#${label}.` : label;
+      if (ctx.sceneMeta[id]?.omitted) attrs.class = 'is-omitted';
     }
+    const mark = markLabel(ctx.marks[id], ctx.tagNames);
+    if (mark) {
+      attrs['data-mark'] = mark;
+      attrs.class = `${attrs.class ?? ''} has-mark${ctx.marks[id]?.locked ? ' is-locked' : ''}`.trim();
+    }
+    if (Object.keys(attrs).length) decos.push(Decoration.node(offset, offset + node.nodeSize, attrs));
   });
   return DecorationSet.create(doc, decos);
 }
@@ -246,16 +277,18 @@ function buildDecorations(doc: PMNode, format: ScriptFormat): DecorationSet {
 export const ScreenplayLayout = Extension.create<LayoutOptions>({
   name: 'screenplayLayout',
   addOptions() {
-    return { getFormat: () => 'korean' as ScriptFormat };
+    return {
+      getContext: (): LayoutContext => ({ format: 'korean', sceneMeta: {}, numberingLocked: false, marks: {}, tagNames: new Map() }),
+    };
   },
   addProseMirrorPlugins() {
-    const getFormat = this.options.getFormat;
+    const getContext = this.options.getContext;
     return [
       new Plugin<DecorationSet>({
         key: layoutKey,
         state: {
-          init: (_, state) => buildDecorations(state.doc, getFormat()),
-          apply: (tr, old) => (tr.docChanged || tr.getMeta(layoutKey) ? buildDecorations(tr.doc, getFormat()) : old),
+          init: (_, state) => buildDecorations(state.doc, getContext()),
+          apply: (tr, old) => (tr.docChanged || tr.getMeta(layoutKey) ? buildDecorations(tr.doc, getContext()) : old),
         },
         props: {
           decorations: (state) => layoutKey.getState(state),

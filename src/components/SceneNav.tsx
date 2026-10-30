@@ -33,7 +33,7 @@ export function SceneNav({ scenes, acts, currentSceneId, markers, onSelect, inte
             const mark = markers.get(s.id);
             return (
               <button key={s.id} className="scene-btn" aria-pressed={s.id === currentSceneId} onClick={() => onSelect(s.id)}>
-                <span className="scene-no">{format === 'korean' ? `S#${s.number}` : s.number}</span>
+                <span className="scene-no">{format === 'korean' ? `S#${s.label}` : s.label}</span>
                 <div>
                   {s.parts.location || s.heading || '(제목 없는 장면)'}
                   <small>{[s.parts.place, s.parts.time].filter(Boolean).join(' · ')}</small>

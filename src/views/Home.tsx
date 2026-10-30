@@ -121,11 +121,13 @@ export function Home() {
               <span>{focus.project.openQuestions[0] ?? '막과 장면의 순서를 카드로 정리합니다.'}</span>
               <span className="task-link">장면 보드 열기 →</span>
             </button>
-            {focus.project.decisions.length > 0 && (
+            {focus.project.rulings.length > 0 && (
               <div className="decision">
-                <p className="eyebrow">함께 정한 방향</p>
-                {focus.project.decisions.map((d, i) => (
-                  <p key={i}>{d}</p>
+                <p className="eyebrow">판정서</p>
+                {focus.project.rulings.map((r) => (
+                  <p key={r.id}>
+                    <strong>{r.code}</strong> {r.text}
+                  </p>
                 ))}
               </div>
             )}

@@ -1,7 +1,9 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { ConflictError, Store } from './db';
 import { AiError, aiStatus, generateProposal, generateSceneCard, streamChat, toAiError } from './ai';
-import type { ChatScope, ProposalStatus } from '../shared/types';
+import type { ChatScope, DocumentKind, ProposalStatus } from '../shared/types';
+import { sceneElements } from '../shared/screenplay';
+import { lockedChanged } from '../shared/audit';
 import { authConfigFromEnv, createAuth, type AuthConfig } from './auth';
 
 type Handler = (req: Request, res: Response) => unknown;
@@ -85,7 +87,7 @@ export function createApp(store: Store, authConfig: AuthConfig = authConfigFromE
       res.on('close', () => {
         if (!res.writableEnded) controller.abort();
       });
-      const draft = await generateProposal(project, sceneId, instruction, controller.signal);
+      const draft = await generateProposal(project, store.listDocuments(project.id), sceneId, instruction, controller.signal);
       const proposal = store.createProposal({ projectId: project.id, sceneId, instruction, ...draft });
       res.status(201).json(proposal);
     }),
@@ -94,6 +96,16 @@ export function createApp(store: Store, authConfig: AuthConfig = authConfigFromE
   api.patch('/proposals/:pid', (req, res) => {
     const status = req.body?.status as ProposalStatus;
     if (!['pending', 'accepted', 'held', 'rejected'].includes(status)) return res.status(400).json({ error: '잘못된 상태입니다.' });
+    const current = store.getProposal(req.params.pid);
+    if (!current) return res.status(404).json({ error: '수정안을 찾을 수 없습니다.' });
+    if (status === 'accepted') {
+      // 【확정】 표현을 바꾼 수정안은 채택할 수 없다
+      const project = store.getProject(current.projectId);
+      const original = project ? sceneElements(project.elements, current.sceneId) : [];
+      if (project && lockedChanged(original.length ? original : current.original, current.revised, project.elementMarks).length) {
+        return res.status(409).json({ error: '이 수정안은 작가 확정 표현을 바꿉니다. 확정을 풀거나 수정안을 다시 받아 주세요.' });
+      }
+    }
     const p = store.setProposalStatus(req.params.pid, status);
     if (!p) return res.status(404).json({ error: '수정안을 찾을 수 없습니다.' });
     res.json(p);
@@ -101,6 +113,36 @@ export function createApp(store: Store, authConfig: AuthConfig = authConfigFromE
 
   api.delete('/proposals/:pid', (req, res) => {
     if (!store.deleteProposal(req.params.pid)) return res.status(404).json({ error: '수정안을 찾을 수 없습니다.' });
+    res.status(204).end();
+  });
+
+  // ------------------------------------------------------------ documents
+  const DOC_KINDS: DocumentKind[] = ['synopsis', 'treatment', 'scene-log', 'characters', 'scene-bank', 'research', 'other'];
+  const docKind = (v: unknown): DocumentKind | undefined => (DOC_KINDS.includes(v as DocumentKind) ? (v as DocumentKind) : undefined);
+
+  api.get('/projects/:id/documents', (req, res) => res.json(store.listDocuments(req.params.id)));
+  api.post('/projects/:id/documents', (req, res) => {
+    if (!store.getProject(req.params.id)) return res.status(404).json({ error: '작품을 찾을 수 없습니다.' });
+    res.status(201).json(
+      store.createDocument({
+        projectId: req.params.id,
+        kind: docKind(req.body?.kind) ?? 'other',
+        title: str(req.body?.title, 200).trim() || '제목 없는 문서',
+        content: str(req.body?.content, 2_000_000),
+      }),
+    );
+  });
+  api.put('/documents/:did', (req, res) => {
+    const patch: Parameters<Store['updateDocument']>[1] = {};
+    if (docKind(req.body?.kind)) patch.kind = docKind(req.body.kind);
+    if (typeof req.body?.title === 'string') patch.title = str(req.body.title, 200).trim() || '제목 없는 문서';
+    if (typeof req.body?.content === 'string') patch.content = str(req.body.content, 2_000_000);
+    const d = store.updateDocument(req.params.did, patch);
+    if (!d) return res.status(404).json({ error: '문서를 찾을 수 없습니다.' });
+    res.json(d);
+  });
+  api.delete('/documents/:did', (req, res) => {
+    if (!store.deleteDocument(req.params.did)) return res.status(404).json({ error: '문서를 찾을 수 없습니다.' });
     res.status(204).end();
   });
 
@@ -167,6 +209,7 @@ export function createApp(store: Store, authConfig: AuthConfig = authConfigFromE
       try {
         const text = await streamChat({
           project,
+          documents: store.listDocuments(project.id),
           sceneId,
           scope,
           history: store.listChat(project.id, sceneId),
@@ -190,7 +233,7 @@ export function createApp(store: Store, authConfig: AuthConfig = authConfigFromE
     wrap(async (req, res) => {
       const project = store.getProject(req.params.id);
       if (!project) return res.status(404).json({ error: '작품을 찾을 수 없습니다.' });
-      res.json(await generateSceneCard(project, str(req.body?.sceneId, 100)));
+      res.json(await generateSceneCard(project, store.listDocuments(project.id), str(req.body?.sceneId, 100)));
     }),
   );
 

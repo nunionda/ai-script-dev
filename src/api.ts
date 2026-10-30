@@ -5,10 +5,14 @@ import type {
   ProjectSummary,
   Proposal,
   ProposalStatus,
+  ReferenceDocument,
   SceneComment,
+  SceneMeta,
   Snapshot,
   SnapshotSummary,
 } from '../shared/types';
+
+export type GeneratedCard = Required<Pick<SceneMeta, 'synopsis' | 'intent' | 'pov' | 'goal' | 'obstacle' | 'outcome' | 'valueStart' | 'valueEnd' | 'turnBy' | 'link'>>;
 
 export class ApiError extends Error {
   constructor(
@@ -76,7 +80,12 @@ export const api = {
 
   listChat: (id: string, sceneId: string) => request<ChatMessage[]>('GET', `/projects/${id}/chat?sceneId=${encodeURIComponent(sceneId)}`),
   clearChat: (id: string, sceneId: string) => request<void>('DELETE', `/projects/${id}/chat?sceneId=${encodeURIComponent(sceneId)}`),
-  sceneCard: (id: string, sceneId: string) => request<{ synopsis: string; intent: string }>('POST', `/projects/${id}/scene-card`, { sceneId }),
+  sceneCard: (id: string, sceneId: string) => request<GeneratedCard>('POST', `/projects/${id}/scene-card`, { sceneId }),
+
+  listDocuments: (id: string) => request<ReferenceDocument[]>('GET', `/projects/${id}/documents`),
+  createDocument: (id: string, d: Pick<ReferenceDocument, 'kind' | 'title' | 'content'>) => request<ReferenceDocument>('POST', `/projects/${id}/documents`, d),
+  updateDocument: (did: string, d: Partial<Pick<ReferenceDocument, 'kind' | 'title' | 'content'>>) => request<ReferenceDocument>('PUT', `/documents/${did}`, d),
+  deleteDocument: (did: string) => request<void>('DELETE', `/documents/${did}`),
 };
 
 export interface ChatHandlers {

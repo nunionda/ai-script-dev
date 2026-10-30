@@ -18,6 +18,7 @@ import {
   docToElements,
   elementsToDoc,
   layoutKey,
+  type LayoutContext,
 } from './extensions';
 
 export interface CursorInfo {
@@ -29,6 +30,8 @@ export interface CursorInfo {
 interface Props {
   initial: ScriptElement[];
   format: ScriptFormat;
+  /** 장면 번호 고정·삭제 장면, 【확정】·태그 표시 */
+  layout: Omit<LayoutContext, 'format'>;
   extraCharacters: string[];
   onChange: (elements: ScriptElement[]) => void;
   onCursor: (info: CursorInfo) => void;
@@ -44,9 +47,11 @@ interface SuggestState {
   pos: number;
 }
 
-export function ScriptEditor({ initial, format, extraCharacters, onChange, onCursor, onReady }: Props) {
+export function ScriptEditor({ initial, format, layout, extraCharacters, onChange, onCursor, onReady }: Props) {
   const formatRef = useRef(format);
   formatRef.current = format;
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
   const extraRef = useRef(extraCharacters);
   extraRef.current = extraCharacters;
   const onChangeRef = useRef(onChange);
@@ -76,7 +81,7 @@ export function ScriptEditor({ initial, format, extraCharacters, onChange, onCur
       History.configure({ depth: 500 }),
       ScreenplayKeymap,
       UniqueIds,
-      ScreenplayLayout.configure({ getFormat: () => formatRef.current }),
+      ScreenplayLayout.configure({ getContext: () => ({ ...layoutRef.current, format: formatRef.current }) }),
       Placeholder.configure({
         placeholder: ({ node }) => `${ELEMENT_INFO[node.attrs.type as ElementType].label}…`,
         showOnlyCurrent: true,
@@ -210,10 +215,10 @@ export function ScriptEditor({ initial, format, extraCharacters, onChange, onCur
     return () => onReady(null);
   }, [editor, onReady]);
 
-  // 서식(한국식/할리우드식)이 바뀌면 장면 번호 표기를 다시 그린다
+  // 서식·번호 고정·요소 표시가 바뀌면 다시 그린다
   useEffect(() => {
     if (editor) editor.view.dispatch(editor.state.tr.setMeta(layoutKey, true));
-  }, [editor, format]);
+  }, [editor, format, layout]);
 
   useEffect(
     () => () => {

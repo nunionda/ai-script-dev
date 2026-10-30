@@ -1,5 +1,4 @@
-import { useMemo, useState } from 'react';
-import { Plus, Trash2 } from 'lucide-react';
+import { useMemo } from 'react';
 import { characterStats, getScenes } from '../../shared/screenplay';
 import { formatEighths, paginate } from '../../shared/pagination';
 import { useProject } from '../state';
@@ -22,7 +21,6 @@ export function Reports() {
     }
     return [...m.entries()].sort((a, b) => b[1].count - a[1].count);
   }, [scenes, pagination]);
-  const [decision, setDecision] = useState('');
   const characterNames = [...new Set([...stats.map((s) => s.name), ...Object.keys(project.characters)])];
 
   return (
@@ -78,38 +76,17 @@ export function Reports() {
         </section>
 
         <section className="card">
-          <h2>함께 정한 방향</h2>
-          <p className="muted small">팀의 결정은 AI 개발 파트너가 제안할 때 반드시 지키는 원칙이 됩니다.</p>
+          <h2>판정서</h2>
+          <p className="muted small">AI 개발 파트너가 어떤 경우에도 지키는 최우선 규칙입니다.</p>
           <ul className="plain-list">
-            {project.decisions.map((d, i) => (
-              <li key={i} className="row">
-                <textarea
-                  rows={2}
-                  value={d}
-                  aria-label={`결정 ${i + 1}`}
-                  onChange={(e) => update((p) => ({ decisions: p.decisions.map((x, j) => (j === i ? e.target.value : x)) }))}
-                />
-                <button className="icon-btn" aria-label="결정 삭제" onClick={() => update((p) => ({ decisions: p.decisions.filter((_, j) => j !== i) }))}>
-                  <Trash2 aria-hidden="true" />
-                </button>
+            {project.rulings.map((r) => (
+              <li key={r.id}>
+                <strong>{r.code}</strong> {r.text}
               </li>
             ))}
           </ul>
-          <form
-            className="row tight"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!decision.trim()) return;
-              update((p) => ({ decisions: [...p.decisions, decision.trim()] }));
-              setDecision('');
-            }}
-          >
-            <input value={decision} onChange={(e) => setDecision(e.target.value)} placeholder="예: 감정은 대사보다 행동에 남긴다." aria-label="새 결정" />
-            <button type="submit" disabled={!decision.trim()}>
-              <Plus aria-hidden="true" />
-              추가
-            </button>
-          </form>
+          {!project.rulings.length && <p className="muted small">아직 판정서가 없습니다.</p>}
+          <button onClick={() => go(projectPath(project.id, 'bible'))}>작품 바이블에서 편집 →</button>
         </section>
 
         <section className="card span-2">
@@ -138,7 +115,7 @@ export function Reports() {
                     <th scope="row">{name}</th>
                     <td className="num">{s?.dialogues ?? 0}</td>
                     <td className="num">{s?.scenes ?? 0}</td>
-                    <td className="num">{s ? `S#${s.firstScene}` : '—'}</td>
+                    <td className="num">{s ? `S#${scenes[s.firstScene - 1]?.label ?? s.firstScene}` : '—'}</td>
                     <td>
                       <textarea
                         rows={2}
@@ -185,7 +162,7 @@ export function Reports() {
             <tbody>
               {scenes.map((s) => (
                 <tr key={s.id}>
-                  <td className="num">{s.number}</td>
+                  <td className="num">{s.label}</td>
                   <td>
                     <button className="link-btn" onClick={() => go(projectPath(project.id, 'write', s.id))}>
                       {s.parts.location || s.heading || '(제목 없음)'}

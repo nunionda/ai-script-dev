@@ -2,7 +2,16 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type {
+  AuditFinding,
   ChatMessage,
+  ChecklistResult,
+  DocumentKind,
+  ElementMark,
+  OpenIssue,
+  ReferenceDocument,
+  Ruling,
+  SceneCard,
+  TagCategory,
   Project,
   ProjectSummary,
   Proposal,
@@ -13,7 +22,7 @@ import type {
 } from '../shared/types';
 import { normalizeElements, uid } from '../shared/screenplay';
 import { paginate } from '../shared/pagination';
-import { sampleProject } from '../shared/sample';
+import { bibleDefaults, sampleProject } from '../shared/sample';
 
 type ProjectData = Omit<Project, 'id' | 'rev' | 'createdAt' | 'updatedAt'>;
 
@@ -29,7 +38,14 @@ const PROJECT_FIELDS: (keyof ProjectData)[] = [
   'acts',
   'sceneMeta',
   'characters',
-  'decisions',
+  'rulings',
+  'oneAction',
+  'hardRules',
+  'bannedWords',
+  'tagCategories',
+  'elementMarks',
+  'auditOptions',
+  'numberingLocked',
   'openQuestions',
 ];
 
@@ -39,7 +55,55 @@ export class ConflictError extends Error {
   }
 }
 
-export function sanitizeProjectData(input: Partial<ProjectData>, base?: ProjectData): ProjectData {
+const isObj = (v: unknown): v is Record<string, unknown> => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+const text = (v: unknown, max = 20000) => (typeof v === 'string' ? v.slice(0, max) : '');
+
+function sanitizeRulings(v: unknown, prefix: string): Ruling[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .filter(isObj)
+    .map((r, i) => ({ id: text(r.id, 40) || uid(prefix.toLowerCase()), code: text(r.code, 20).trim() || `${prefix}${i + 1}`, text: text(r.text) }));
+}
+
+function sanitizeTagCategories(v: unknown): TagCategory[] {
+  if (!Array.isArray(v)) return [];
+  const kinds = ['motif', 'counter', 'intimacy', 'note'];
+  const count = (x: unknown) => (typeof x === 'number' && Number.isInteger(x) && x >= 0 ? x : undefined);
+  return v.filter(isObj).map((c) => ({
+    id: text(c.id, 40) || uid('t'),
+    name: text(c.name, 80),
+    kind: (kinds.includes(c.kind as string) ? c.kind : 'note') as TagCategory['kind'],
+    exact: count(c.exact),
+    max: count(c.max),
+  }));
+}
+
+function sanitizeMarks(v: unknown): Record<string, ElementMark> {
+  if (!isObj(v)) return {};
+  const out: Record<string, ElementMark> = {};
+  const stages = ['setup', 'variation', 'payoff'];
+  for (const [id, raw] of Object.entries(v)) {
+    if (!isObj(raw)) continue;
+    const m: ElementMark = {};
+    if (raw.locked === true) m.locked = true;
+    if (raw.play === true) m.play = true;
+    if (Array.isArray(raw.tags)) {
+      const tags = raw.tags
+        .filter(isObj)
+        .filter((t) => typeof t.cat === 'string' && t.cat)
+        .map((t) => ({
+          cat: t.cat as string,
+          ...(stages.includes(t.stage as string) ? { stage: t.stage as 'setup' } : {}),
+          ...(typeof t.note === 'string' && t.note ? { note: t.note.slice(0, 500) } : {}),
+        }));
+      if (tags.length) m.tags = tags;
+    }
+    if (m.locked || m.play || m.tags) out[id] = m;
+  }
+  return out;
+}
+
+export function sanitizeProjectData(input: Partial<ProjectData> & { decisions?: unknown }, base?: ProjectData): ProjectData {
   const b: ProjectData = base ?? {
     title: '제목 없음',
     logline: '',
@@ -52,12 +116,18 @@ export function sanitizeProjectData(input: Partial<ProjectData>, base?: ProjectD
     acts: [],
     sceneMeta: {},
     characters: {},
-    decisions: [],
+    ...bibleDefaults(),
     openQuestions: [],
   };
   const str = (v: unknown, d: string) => (typeof v === 'string' ? v : d);
   const strArr = (v: unknown, d: string[]) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : d);
-  const obj = <T>(v: unknown, d: T): T => (v && typeof v === 'object' && !Array.isArray(v) ? (v as T) : d);
+  const obj = <T>(v: unknown, d: T): T => (isObj(v) ? (v as T) : d);
+  // 예전 "함께 정한 방향"(decisions)은 판정서 D1… 로 옮긴다
+  const legacyRulings =
+    input.rulings === undefined && Array.isArray(input.decisions)
+      ? strArr(input.decisions, []).map((t, i) => ({ id: `legacy-d${i + 1}`, code: `D${i + 1}`, text: t }))
+      : undefined;
+  const audit = isObj(input.auditOptions) ? input.auditOptions : undefined;
   return {
     title: str(input.title, b.title).trim() || '제목 없음',
     logline: str(input.logline, b.logline),
@@ -72,7 +142,16 @@ export function sanitizeProjectData(input: Partial<ProjectData>, base?: ProjectD
       : b.acts,
     sceneMeta: obj(input.sceneMeta, b.sceneMeta),
     characters: obj(input.characters, b.characters),
-    decisions: strArr(input.decisions, b.decisions),
+    rulings: legacyRulings ?? (input.rulings !== undefined ? sanitizeRulings(input.rulings, 'R') : b.rulings),
+    oneAction: str(input.oneAction, b.oneAction),
+    hardRules: input.hardRules !== undefined ? sanitizeRulings(input.hardRules, 'H') : b.hardRules,
+    bannedWords: input.bannedWords !== undefined ? strArr(input.bannedWords, []).map((w) => w.trim()).filter(Boolean) : b.bannedWords,
+    tagCategories: input.tagCategories !== undefined ? sanitizeTagCategories(input.tagCategories) : b.tagCategories,
+    elementMarks: input.elementMarks !== undefined ? sanitizeMarks(input.elementMarks) : b.elementMarks,
+    auditOptions: audit
+      ? { banVoiceOver: audit.banVoiceOver === true, requireSceneCard: audit.requireSceneCard === true }
+      : b.auditOptions,
+    numberingLocked: typeof input.numberingLocked === 'boolean' ? input.numberingLocked : b.numberingLocked,
     openQuestions: strArr(input.openQuestions, b.openQuestions),
   };
 }
@@ -132,7 +211,17 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_snapshots_project ON snapshots(project_id);
       CREATE INDEX IF NOT EXISTS idx_proposals_project ON proposals(project_id);
       CREATE INDEX IF NOT EXISTS idx_comments_project ON comments(project_id);
+      CREATE TABLE IF NOT EXISTS documents (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        position INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      );
       CREATE INDEX IF NOT EXISTS idx_chat_project_scene ON chat(project_id, scene_id);
+      CREATE INDEX IF NOT EXISTS idx_documents_project ON documents(project_id);
     `);
   }
 
@@ -263,6 +352,14 @@ export class Store {
       rationale: data.rationale ?? '',
       original: normalizeElements(data.original),
       revised: normalizeElements(data.revised),
+      quotes: Array.isArray(data.quotes) ? data.quotes : [],
+      sceneCard: (isObj(data.sceneCard) ? data.sceneCard : {}) as SceneCard,
+      antiCliche: Array.isArray(data.antiCliche) ? data.antiCliche : [],
+      selfReview: (Array.isArray(data.selfReview) ? data.selfReview : []) as ChecklistResult[],
+      audit: (Array.isArray(data.audit) ? data.audit : []) as AuditFinding[],
+      openIssues: (Array.isArray(data.openIssues) ? data.openIssues : []) as OpenIssue[],
+      changeLog: typeof data.changeLog === 'string' ? data.changeLog : '',
+      rewrites: typeof data.rewrites === 'number' ? data.rewrites : 0,
       createdAt: r.created_at as string,
       updatedAt: r.updated_at as string,
     };
@@ -281,7 +378,7 @@ export class Store {
   createProposal(p: Omit<Proposal, 'id' | 'createdAt' | 'updatedAt' | 'status'>): Proposal {
     const id = uid('r');
     const now = new Date().toISOString();
-    const data = { title: p.title, instruction: p.instruction, rationale: p.rationale, original: p.original, revised: p.revised };
+    const { projectId: _p, sceneId: _s, ...data } = p;
     this.db
       .prepare('INSERT INTO proposals (id, project_id, scene_id, status, data, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(id, p.projectId, p.sceneId, 'pending', JSON.stringify(data), now, now);
@@ -295,6 +392,52 @@ export class Store {
 
   deleteProposal(id: string): boolean {
     return Number(this.db.prepare('DELETE FROM proposals WHERE id = ?').run(id).changes) > 0;
+  }
+
+  // ------------------------------------------------------------ documents
+
+  private rowToDocument(r: Record<string, unknown>): ReferenceDocument {
+    return {
+      id: r.id as string,
+      projectId: r.project_id as string,
+      kind: r.kind as DocumentKind,
+      title: r.title as string,
+      content: r.content as string,
+      updatedAt: r.updated_at as string,
+    };
+  }
+
+  listDocuments(projectId: string): ReferenceDocument[] {
+    const rows = this.db.prepare('SELECT * FROM documents WHERE project_id = ? ORDER BY position, updated_at').all(projectId) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToDocument(r));
+  }
+
+  getDocument(id: string): ReferenceDocument | null {
+    const r = this.db.prepare('SELECT * FROM documents WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    return r ? this.rowToDocument(r) : null;
+  }
+
+  createDocument(d: Pick<ReferenceDocument, 'projectId' | 'kind' | 'title' | 'content'>): ReferenceDocument {
+    const id = uid('f');
+    const position = (this.db.prepare('SELECT COUNT(*) AS n FROM documents WHERE project_id = ?').get(d.projectId) as { n: number }).n;
+    this.db
+      .prepare('INSERT INTO documents (id, project_id, kind, title, content, position, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(id, d.projectId, d.kind, d.title, d.content, position, new Date().toISOString());
+    return this.getDocument(id)!;
+  }
+
+  updateDocument(id: string, patch: Partial<Pick<ReferenceDocument, 'kind' | 'title' | 'content'>>): ReferenceDocument | null {
+    const cur = this.getDocument(id);
+    if (!cur) return null;
+    const next = { ...cur, ...patch };
+    this.db
+      .prepare('UPDATE documents SET kind = ?, title = ?, content = ?, updated_at = ? WHERE id = ?')
+      .run(next.kind, next.title, next.content, new Date().toISOString(), id);
+    return this.getDocument(id);
+  }
+
+  deleteDocument(id: string): boolean {
+    return Number(this.db.prepare('DELETE FROM documents WHERE id = ?').run(id).changes) > 0;
   }
 
   // ------------------------------------------------------------ comments

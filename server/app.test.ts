@@ -5,6 +5,8 @@ import { Store } from './db';
 import { createApp } from './app';
 import type { Project } from '../shared/types';
 
+const emptyReview = { quotes: [], sceneCard: {}, antiCliche: [], selfReview: [], audit: [], openIssues: [], changeLog: '', rewrites: 0 };
+
 let server: Server;
 let base = '';
 const store = new Store(':memory:');
@@ -86,9 +88,47 @@ describe('snapshots, comments, proposals', () => {
 
   it('stores proposal status changes', () => {
     const [summary] = store.listProjects();
-    const p = store.createProposal({ projectId: summary.id, sceneId: 's', title: 't', instruction: 'i', rationale: 'r', original: [], revised: [] });
+    const p = store.createProposal({ projectId: summary.id, sceneId: 's', title: 't', instruction: 'i', rationale: 'r', original: [], revised: [], ...emptyReview });
     expect(p.status).toBe('pending');
     expect(store.setProposalStatus(p.id, 'accepted')!.status).toBe('accepted');
+  });
+
+  it('refuses to accept a proposal that rewrites a locked expression', async () => {
+    const created = (await call('POST', '/projects', { title: '확정', elements: [{ type: 'scene', text: '내부. 방 - 밤' }, { type: 'dialogue', text: '확정 대사' }] })).body as Project;
+    const [scene, line] = created.elements;
+    await call('PUT', `/projects/${created.id}`, { elementMarks: { [line.id]: { locked: true } } });
+    const bad = store.createProposal({
+      projectId: created.id,
+      sceneId: scene.id,
+      title: 't',
+      instruction: '',
+      rationale: '',
+      original: created.elements,
+      revised: [scene, { ...line, text: '바뀐 대사' }],
+      ...emptyReview,
+    });
+    const refused = await call('PATCH', `/proposals/${bad.id}`, { status: 'accepted' });
+    expect(refused.status).toBe(409);
+    expect((await call('PATCH', `/proposals/${bad.id}`, { status: 'held' })).status).toBe(200);
+    const good = store.createProposal({ projectId: created.id, sceneId: scene.id, title: 't', instruction: '', rationale: '', original: created.elements, revised: created.elements, ...emptyReview });
+    expect((await call('PATCH', `/proposals/${good.id}`, { status: 'accepted' })).status).toBe(200);
+  });
+
+  it('keeps reference documents per project', async () => {
+    const [summary] = store.listProjects();
+    const created = await call('POST', `/projects/${summary.id}/documents`, { kind: 'research', title: '취재 노트', content: '2011년 요금' });
+    expect(created.status).toBe(201);
+    const updated = await call('PUT', `/documents/${created.body.id}`, { content: '2011년 요금 [확인]', kind: 'bogus' });
+    expect(updated.body.kind).toBe('research');
+    expect(updated.body.content).toBe('2011년 요금 [확인]');
+    expect((await call('GET', `/projects/${summary.id}/documents`)).body).toHaveLength(1);
+    expect((await call('DELETE', `/documents/${created.body.id}`)).status).toBe(204);
+  });
+
+  it('migrates legacy decisions into rulings', () => {
+    const p = store.createProject({ title: '옛 작품', decisions: ['감정은 행동으로.'] } as never);
+    expect(p.rulings).toEqual([{ id: 'legacy-d1', code: 'D1', text: '감정은 행동으로.' }]);
+    store.deleteProject(p.id);
   });
 
   it('returns 404 for unknown API routes', async () => {
