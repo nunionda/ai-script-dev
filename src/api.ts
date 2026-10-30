@@ -13,7 +13,18 @@ import type {
   Snapshot,
   SnapshotSummary,
   StructureAudit,
+  TranslationLoss,
+  ScriptElement,
 } from '../shared/types';
+
+export interface SceneTranslation {
+  elements: ScriptElement[];
+  losses: TranslationLoss[];
+  names: Record<string, string>;
+  sourceHash: string;
+  label: string;
+  act: string;
+}
 
 export type GeneratedCard = Required<Pick<SceneMeta, 'synopsis' | 'intent' | 'pov' | 'goal' | 'obstacle' | 'outcome' | 'valueStart' | 'valueEnd' | 'turnBy' | 'link'>>;
 
@@ -76,6 +87,11 @@ export const api = {
   setProposalStatus: (pid: string, status: ProposalStatus) => request<Proposal>('PATCH', `/proposals/${pid}`, { status }),
   deleteProposal: (pid: string) => request<void>('DELETE', `/proposals/${pid}`),
   reviewProposal: (pid: string, role: ReviewRole) => request<Proposal>('POST', `/proposals/${pid}/reviews`, { role }),
+
+  listTranslations: (id: string) => request<ProjectSummary[]>('GET', `/projects/${id}/translations`),
+  createTranslation: (id: string) => request<Project>('POST', `/projects/${id}/translations`),
+  translateScene: (id: string, sourceSceneId: string, names: Record<string, string>) =>
+    request<SceneTranslation>('POST', `/projects/${id}/translate-scene`, { sourceSceneId, names }),
 
   getStructureAudit: (id: string) => request<StructureAudit | null>('GET', `/projects/${id}/audit/structure`),
   runStructureAudit: (id: string) => request<StructureAudit>('POST', `/projects/${id}/audit/structure`),

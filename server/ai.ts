@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import type { AuditFinding, ChatMessage, ChatScope, ChecklistResult, OpenIssue, Project, ReferenceDocument, SceneCard, ScriptElement } from '../shared/types';
 import { ELEMENT_TYPES } from '../shared/types';
 import { carryIds, el, sceneElements } from '../shared/screenplay';
+import { expandRuns } from '../shared/fountain';
 import { auditRevision } from '../shared/audit';
 import { CARD_INSTRUCTIONS, CHECK_CODES, PARTNER_INSTRUCTIONS, REVISION_INSTRUCTIONS, bibleBlock, documentsBlock, sceneBlock } from './prompts';
 
@@ -343,7 +344,7 @@ export async function generateProposal(
 
   for (let rewrites = 0; ; rewrites++) {
     const parsed = await parseProposal(system, messages, signal);
-    const written = parsed.elements
+    const written = expandRuns(parsed.elements)
       .filter((e) => e.text.trim())
       // 문맥에 붙여 준 장면 번호를 모델이 헤딩에 옮겨 쓰는 경우가 있다
       .map((e) => el(e.type, e.type === 'scene' ? e.text.trim().replace(/^S#\s*[\w-]+\.\s*/i, '') : e.text.trim()));

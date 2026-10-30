@@ -32,6 +32,7 @@ const FIELDS = ['title', 'logline', 'genre', 'author', 'contact', 'format', 'sta
   'auditOptions',
   'numberingLocked',
   'openQuestions',
+  'translation',
 ] as const;
 
 function dataOf(p: Project): ProjectPatch {

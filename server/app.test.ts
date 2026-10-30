@@ -152,6 +152,24 @@ describe('snapshots, comments, proposals', () => {
     expect((await call('GET', `/projects/${empty.id}/audit/structure`)).body.summary).toBe('두 번째');
   });
 
+  it('creates a linked English parallel version', async () => {
+    const src = (await call('POST', '/projects', { title: '정본', elements: [{ type: 'scene', text: '내부. 방 - 밤' }], rulings: [{ code: 'R1', text: '규칙' }] })).body as Project;
+    const created = await call('POST', `/projects/${src.id}/translations`);
+    expect(created.status).toBe(201);
+    const en = created.body as Project;
+    expect(en.format).toBe('hollywood');
+    expect(en.translation?.sourceProjectId).toBe(src.id);
+    expect(en.rulings[0].text).toBe('규칙');
+    expect((await call('GET', `/projects/${src.id}/translations`)).body.map((p: Project) => p.id)).toEqual([en.id]);
+    // 병행본에서 다시 병행본을 만들 수 없다
+    expect((await call('POST', `/projects/${en.id}/translations`)).status).toBe(400);
+    expect((await call('POST', `/projects/${src.id}/translate-scene`, { sourceSceneId: 'x' })).status).toBe(400);
+    expect((await call('POST', `/projects/${en.id}/translate-scene`, { sourceSceneId: 'nope' })).status).toBe(404);
+    // 저장해도 연결이 남는다
+    const saved = await call('PUT', `/projects/${en.id}`, { translation: { ...en.translation, names: { 세영: 'SEYOUNG' } } });
+    expect(saved.body.translation.names).toEqual({ 세영: 'SEYOUNG' });
+  });
+
   it('returns 404 for unknown API routes', async () => {
     expect((await call('GET', '/nope')).status).toBe(404);
   });

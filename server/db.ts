@@ -12,6 +12,8 @@ import type {
   RoleReview,
   Ruling,
   SceneCard,
+  TranslatedScene,
+  TranslationLink,
   TagCategory,
   Project,
   ProjectSummary,
@@ -49,6 +51,7 @@ const PROJECT_FIELDS: (keyof ProjectData)[] = [
   'auditOptions',
   'numberingLocked',
   'openQuestions',
+  'translation',
 ];
 
 export class ConflictError extends Error {
@@ -105,6 +108,29 @@ function sanitizeMarks(v: unknown): Record<string, ElementMark> {
   return out;
 }
 
+function sanitizeTranslation(v: unknown): TranslationLink | null {
+  if (!isObj(v) || typeof v.sourceProjectId !== 'string' || !v.sourceProjectId) return null;
+  const scenes: Record<string, TranslatedScene> = {};
+  for (const [id, raw] of Object.entries(isObj(v.scenes) ? v.scenes : {})) {
+    if (!isObj(raw) || typeof raw.targetSceneId !== 'string') continue;
+    scenes[id] = {
+      targetSceneId: raw.targetSceneId,
+      sourceHash: text(raw.sourceHash, 40),
+      targetHash: text(raw.targetHash, 40),
+      translatedAt: text(raw.translatedAt, 40),
+      losses: (Array.isArray(raw.losses) ? raw.losses : []).filter(isObj).map((l) => ({
+        original: text(l.original, 2000),
+        translation: text(l.translation, 2000),
+        loss: text(l.loss, 2000),
+        compensation: text(l.compensation, 2000),
+      })),
+    };
+  }
+  const names: Record<string, string> = {};
+  for (const [ko, en] of Object.entries(isObj(v.names) ? v.names : {})) if (typeof en === 'string' && en.trim()) names[ko.slice(0, 80)] = en.slice(0, 80);
+  return { sourceProjectId: v.sourceProjectId, language: 'en', scenes, names };
+}
+
 export function sanitizeProjectData(input: Partial<ProjectData> & { decisions?: unknown }, base?: ProjectData): ProjectData {
   const b: ProjectData = base ?? {
     title: '제목 없음',
@@ -120,6 +146,7 @@ export function sanitizeProjectData(input: Partial<ProjectData> & { decisions?: 
     characters: {},
     ...bibleDefaults(),
     openQuestions: [],
+    translation: null,
   };
   const str = (v: unknown, d: string) => (typeof v === 'string' ? v : d);
   const strArr = (v: unknown, d: string[]) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : d);
@@ -155,6 +182,7 @@ export function sanitizeProjectData(input: Partial<ProjectData> & { decisions?: 
       : b.auditOptions,
     numberingLocked: typeof input.numberingLocked === 'boolean' ? input.numberingLocked : b.numberingLocked,
     openQuestions: strArr(input.openQuestions, b.openQuestions),
+    translation: input.translation !== undefined ? sanitizeTranslation(input.translation) : b.translation,
   };
 }
 

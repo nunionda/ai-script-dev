@@ -92,7 +92,7 @@ export function blankProject(title: string): Omit<Project, 'id' | 'rev' | 'creat
 }
 
 /** 작품 바이블 기본값: 판정서·규칙·태그가 비어 있는 상태 */
-export function bibleDefaults(): Pick<Project, 'rulings' | 'oneAction' | 'hardRules' | 'bannedWords' | 'tagCategories' | 'elementMarks' | 'auditOptions' | 'numberingLocked'> {
+export function bibleDefaults(): Pick<Project, 'rulings' | 'oneAction' | 'hardRules' | 'bannedWords' | 'tagCategories' | 'elementMarks' | 'auditOptions' | 'numberingLocked' | 'translation'> {
   return {
     rulings: [],
     oneAction: '',
@@ -102,5 +102,6 @@ export function bibleDefaults(): Pick<Project, 'rulings' | 'oneAction' | 'hardRu
     elementMarks: {},
     auditOptions: { banVoiceOver: false, requireSceneCard: false },
     numberingLocked: false,
+    translation: null,
   };
 }

@@ -1735,6 +1735,19 @@ p.banner {
   margin: 0;
 }
 
+.tag-muted {
+  background: transparent;
+  border: 1px dashed var(--line);
+  color: var(--muted);
+}
+.parallel .losses {
+  margin-top: 16px;
+}
+.parallel .losses td {
+  font-size: 12px;
+  vertical-align: top;
+}
+
 /* ---------------------------------------------------------------- responsive */
 @media (max-width: 1100px) {
   .workspace {

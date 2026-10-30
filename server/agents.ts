@@ -1,6 +1,8 @@
 import { z } from 'zod';
-import type { ChatMessage, ChatSummary, Project, Proposal, ReferenceDocument, ReviewRole, RoleReview, StructureAudit } from '../shared/types';
-import { getScenes } from '../shared/screenplay';
+import type { ChatMessage, ChatSummary, Project, Proposal, ReferenceDocument, ReviewRole, RoleReview, ScriptElement, StructureAudit, TranslationLoss } from '../shared/types';
+import { ELEMENT_TYPES } from '../shared/types';
+import { el, getScenes } from '../shared/screenplay';
+import { expandRuns } from '../shared/fountain';
 import { AiError, currentSceneText, projectContext, requireScene, structured } from './ai';
 import { AUTHORITY, CHECKLIST, CRAFT_PRINCIPLES, FORBIDDEN, RESEARCH_PROTOCOL, formatElements } from './prompts';
 
@@ -227,4 +229,79 @@ export async function summarizeChat(project: Project, documents: ReferenceDocume
   );
   const clean = (xs: string[]) => xs.map((s) => s.trim()).filter(Boolean);
   return { decisions: clean(parsed.decisions), open: clean(parsed.open) };
+}
+
+// ---------------------------------------------------------------- 영문 병행본
+
+const TranslationSchema = z.object({
+  elements: z
+    .array(z.object({ type: z.enum(ELEMENT_TYPES), text: z.string() }))
+    .describe('번역한 장면 전체. 첫 요소는 씬 헤딩'),
+  losses: z
+    .array(
+      z.object({
+        original: z.string().describe('원문 구절'),
+        translation: z.string().describe('번역문'),
+        loss: z.string().describe('잃은 것 (존댓말·반말, 호칭, 사투리, 말장난, 문화 맥락 …)'),
+        compensation: z.string().describe('보완한 방법. 못 했으면 "없음"'),
+      }),
+    )
+    .describe('번역 손실표'),
+  names: z.array(z.object({ ko: z.string(), en: z.string() })).describe('이 장면에 쓴 인물·장소 이름 표기'),
+});
+
+const TRANSLATION_INSTRUCTIONS = `<role>
+너는 시나리오 개발 작업실 "FRAME"의 전략 검수자(STRAT)이자 영문 병행본 번역가다. 한국어 정본의 장면을 영어 시나리오로 옮긴다.
+정본이 언제나 우선이다. 번역은 정본을 바꾸지 않고, 장면의 사건·순서·비트를 더하거나 빼지 않는다.
+</role>
+${AUTHORITY}
+<rules>
+- 할리우드식 마스터 씬 서식. 씬 헤딩은 "INT./EXT. LOCATION - DAY/NIGHT" (대문자), 장면 번호는 붙이지 않는다.
+- 인물 이름은 <names>의 표기를 그대로 쓴다. 처음 나오는 이름은 표준 로마자 표기로 정하고 names에 적는다. character 요소는 대문자 이름만.
+- 정본에서 원래 영어로 말한 대사는 문장을 그대로 두고 바로 앞에 parenthetical "(in English)"를 넣는다.
+- 하위텍스트를 보존한다. 직역보다 같은 전술(설득·회피·시험·거래)이 작동하는 영어 대사를 쓴다. 설명을 덧붙이지 않는다.
+- 【확정】 요소는 의미와 리듬을 가장 충실히 옮기고, 무엇을 잃었는지 losses에 반드시 적는다.
+- 존댓말·반말 전환, 호칭(언니·형·선배), 사투리, 말장난, 한국어 고유 맥락은 losses에 원문·번역·잃은 것·보완 방법으로 적는다.
+- 지문은 현재형, 촬영 가능한 것만. 원문 지문의 정보량을 지킨다.
+- 【확정】, 〈극중극〉, {태그} 표시 자체는 출력하지 않는다.
+- elements에는 시나리오 요소를 하나씩 넣는다 (헤딩, 지문 한 문단, 인물 이름, 괄호 지시, 대사가 각각 한 요소). 한 요소에 장면 전체를 몰아 쓰지 않는다.
+</rules>`;
+
+export interface SceneTranslation {
+  elements: ScriptElement[];
+  losses: TranslationLoss[];
+  names: Record<string, string>;
+}
+
+export async function translateScene(
+  source: Project,
+  documents: ReferenceDocument[],
+  sourceSceneId: string,
+  names: Record<string, string>,
+  signal?: AbortSignal,
+): Promise<SceneTranslation> {
+  const sc = requireScene(source, sourceSceneId);
+  if (source.sceneMeta[sourceSceneId]?.omitted) throw new AiError(400, '정본에서 삭제한 장면은 번역하지 않습니다.');
+  const glossary = Object.entries(names)
+    .map(([ko, en]) => `${ko} → ${en}`)
+    .join('\n');
+  const parsed = await structured(
+    TranslationSchema,
+    [projectContext(source, documents), TRANSLATION_INSTRUCTIONS],
+    [
+      {
+        role: 'user',
+        content: `<names note="이미 정한 이름 표기">\n${glossary || '(아직 없음)'}\n</names>\n\n${currentSceneText(sc, '번역할 장면')}\n\n<task>이 장면을 영어 시나리오로 옮기고 번역 손실표를 작성하세요.</task>`,
+      },
+    ],
+    { maxTokens: 16000, effort: 'medium', refusal: '이 장면을 번역할 수 없다는 응답을 받았습니다.', signal },
+  );
+  const elements = expandRuns(parsed.elements)
+    .filter((e) => e.text.trim())
+    .map((e) => el(e.type, e.type === 'scene' ? e.text.trim().replace(/^(S#\s*)?[\w-]+\.\s+(?=(INT|EXT|I\/E))/i, '') : e.text.trim()));
+  if (!elements.length) throw new AiError(502, '번역 결과가 비어 있습니다. 다시 시도해 주세요.');
+  if (elements[0].type !== 'scene') elements.unshift(el('scene', 'INT. UNKNOWN - DAY'));
+  const learned: Record<string, string> = {};
+  for (const n of parsed.names) if (n.ko.trim() && n.en.trim()) learned[n.ko.trim()] = n.en.trim();
+  return { elements, losses: parsed.losses, names: learned };
 }

@@ -136,9 +136,39 @@ export interface Project {
   numberingLocked: boolean;
   /** 결말 등 아직 열어 둔 질문 */
   openQuestions: string[];
+  /** 영문 병행본이면 한국어 정본과의 연결 */
+  translation: TranslationLink | null;
   rev: number;
   createdAt: string;
   updatedAt: string;
+}
+
+/** 번역에서 잃은 것과 보완한 방법 */
+export interface TranslationLoss {
+  original: string;
+  translation: string;
+  loss: string;
+  compensation: string;
+}
+
+export interface TranslatedScene {
+  /** 병행본 쪽 장면 id */
+  targetSceneId: string;
+  /** 번역할 때의 정본 장면 내용 지문(sceneHash) — 바뀌면 "갱신 필요" */
+  sourceHash: string;
+  /** 번역해 넣었을 때의 병행본 장면 지문 — 다르면 작가가 영문을 고친 것 */
+  targetHash: string;
+  translatedAt: string;
+  losses: TranslationLoss[];
+}
+
+/** 영문 병행본 → 한국어 정본 연결. 정본 장면 id로 찾는다. 병행본의 변경은 정본에 반영하지 않는다. */
+export interface TranslationLink {
+  sourceProjectId: string;
+  language: 'en';
+  scenes: Record<string, TranslatedScene>;
+  /** 인물·장소 이름 표기 (한국어 → 영어) */
+  names: Record<string, string>;
 }
 
 export interface ProjectSummary {

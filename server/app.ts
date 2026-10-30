@@ -1,9 +1,10 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { ConflictError, Store } from './db';
 import { AiError, aiStatus, generateProposal, generateSceneCard, streamChat, toAiError } from './ai';
-import { auditStructure, reviewProposal, summarizeChat } from './agents';
+import { auditStructure, reviewProposal, summarizeChat, translateScene } from './agents';
 import { REVIEW_ROLES, type ChatScope, type DocumentKind, type ProposalStatus, type ReviewRole } from '../shared/types';
-import { sceneElements } from '../shared/screenplay';
+import { el, getScenes, sceneElements } from '../shared/screenplay';
+import { hollywoodLabel, sceneHash } from '../shared/translation';
 import { lockedChanged } from '../shared/audit';
 import { authConfigFromEnv, createAuth, type AuthConfig } from './auth';
 
@@ -280,6 +281,68 @@ export function createApp(store: Store, authConfig: AuthConfig = authConfigFromE
       if (!project) return res.status(404).json({ error: '작품을 찾을 수 없습니다.' });
       const sceneId = str(req.body?.sceneId, 100) || 'project';
       res.json(await summarizeChat(project, store.listDocuments(project.id), store.listChat(project.id, sceneId)));
+    }),
+  );
+
+  // ------------------------------------------------------------ English parallel version
+  /** 정본(:id)에 연결된 영문 병행본 목록 */
+  api.get('/projects/:id/translations', (req, res) => {
+    const linked = store
+      .listProjects()
+      .filter((s) => s.id !== req.params.id && store.getProject(s.id)?.translation?.sourceProjectId === req.params.id);
+    res.json(linked);
+  });
+
+  /** 정본(:id)에서 빈 영문 병행본을 만든다. 판정서·규칙·태그 분류는 같이 가져가고, 원고는 장면별로 번역한다. */
+  api.post('/projects/:id/translations', (req, res) => {
+    const src = store.getProject(req.params.id);
+    if (!src) return res.status(404).json({ error: '작품을 찾을 수 없습니다.' });
+    if (src.translation) return res.status(400).json({ error: '병행본에서 다시 병행본을 만들 수 없습니다. 한국어 정본에서 만들어 주세요.' });
+    const created = store.createProject({
+      title: `${src.title} (English)`,
+      genre: src.genre,
+      author: src.author,
+      contact: src.contact,
+      format: 'hollywood',
+      status: '영문 병행본',
+      elements: [el('scene', '')],
+      acts: src.acts,
+      rulings: src.rulings,
+      oneAction: src.oneAction,
+      hardRules: src.hardRules,
+      tagCategories: src.tagCategories,
+      auditOptions: src.auditOptions,
+      // 정본과 같은 장면 번호를 쓴다
+      numberingLocked: true,
+      translation: { sourceProjectId: src.id, language: 'en', scenes: {}, names: {} },
+    });
+    res.status(201).json(created);
+  });
+
+  /** 병행본(:id)에 넣을 장면 번역. 원고 반영은 작가 화면에서 한다 (저장 rev 충돌을 피하려고). */
+  api.post(
+    '/projects/:id/translate-scene',
+    wrap(async (req, res) => {
+      const target = store.getProject(req.params.id);
+      if (!target) return res.status(404).json({ error: '작품을 찾을 수 없습니다.' });
+      if (!target.translation) return res.status(400).json({ error: '영문 병행본이 아닙니다.' });
+      const source = store.getProject(target.translation.sourceProjectId);
+      if (!source) return res.status(404).json({ error: '한국어 정본을 찾을 수 없습니다.' });
+      const sourceSceneId = str(req.body?.sourceSceneId, 100);
+      const scene = getScenes(source).find((s) => s.id === sourceSceneId);
+      if (!scene) return res.status(404).json({ error: '정본에서 장면을 찾을 수 없습니다.' });
+      const controller = new AbortController();
+      res.on('close', () => {
+        if (!res.writableEnded) controller.abort();
+      });
+      const names = { ...target.translation.names, ...(req.body?.names && typeof req.body.names === 'object' ? req.body.names : {}) };
+      const result = await translateScene(source, store.listDocuments(source.id), sourceSceneId, names, controller.signal);
+      res.json({
+        ...result,
+        sourceHash: sceneHash(sceneElements(source.elements, sourceSceneId)),
+        label: hollywoodLabel(scene.label),
+        act: scene.actId,
+      });
     }),
   );
 

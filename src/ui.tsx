@@ -3,7 +3,7 @@ import { X } from 'lucide-react';
 
 // ---------------------------------------------------------------- 라우팅 (hash)
 
-export type View = 'write' | 'board' | 'review' | 'drafts' | 'bible' | 'reports' | 'print';
+export type View = 'write' | 'board' | 'review' | 'drafts' | 'bible' | 'parallel' | 'reports' | 'print';
 
 export interface Route {
   projectId: string | null;
@@ -14,7 +14,7 @@ export interface Route {
 function parse(hash: string): Route {
   const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean);
   if (parts[0] === 'p' && parts[1]) {
-    const view = (['write', 'board', 'review', 'drafts', 'bible', 'reports', 'print'].includes(parts[2]) ? parts[2] : 'write') as View;
+    const view = (['write', 'board', 'review', 'drafts', 'bible', 'parallel', 'reports', 'print'].includes(parts[2]) ? parts[2] : 'write') as View;
     return { projectId: parts[1], view, param: parts[3] ? decodeURIComponent(parts[3]) : null };
   }
   return { projectId: null, view: 'write', param: null };
