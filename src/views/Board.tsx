@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowDown, ArrowUp, NotebookPen, Plus, Sparkles, Trash2 } from 'lucide-react';
 import type { Act, Project, Proposal, SceneLink, SceneMeta, TurnBy } from '../../shared/types';
-import { auditProject } from '../../shared/audit';
+import { auditProject, needsEthicsReview } from '../../shared/audit';
 import { el, getScenes, reorderScenes, uid, type SceneInfo } from '../../shared/screenplay';
 import { formatEighths, paginate } from '../../shared/pagination';
 import { api } from '../api';
-import { useProject } from '../state';
+import { loadMe, useProject } from '../state';
 import { go, projectPath, useAnnounce } from '../ui';
 
 type Layout = { actId: string; sceneIds: string[] }[];
@@ -221,6 +221,7 @@ export function Board() {
                       <textarea rows={2} value={s.meta.intent ?? ''} onChange={(e) => setMeta(s.id, { intent: e.target.value })} />
                     </label>
                     <CardFields meta={s.meta} onChange={(patch) => setMeta(s.id, patch)} />
+                    <SignoffField meta={s.meta} required={needsEthicsReview(project, s.id)} onChange={(patch) => setMeta(s.id, patch)} />
                     <label className="check">
                       <input type="checkbox" checked={Boolean(s.meta.omitted)} onChange={(e) => setMeta(s.id, { omitted: e.target.checked || undefined })} />
                       삭제 장면 (번호 유지)
@@ -241,7 +242,7 @@ export function Board() {
                   <p onDoubleClick={() => setEditing(s.id)}>{s.meta.synopsis || <span className="muted">요약이 없습니다. 편집을 눌러 쓰거나 AI 요약을 받아 보세요.</span>}</p>
                 )}
                 {s.characters.length > 0 && editing !== s.id && <p className="beat-cast">{s.characters.join(' · ')}</p>}
-                {editing !== s.id && <CardSummary meta={s.meta} fails={failsByScene.get(s.id) ?? []} />}
+                {editing !== s.id && <CardSummary meta={s.meta} fails={failsByScene.get(s.id) ?? []} ethics={needsEthicsReview(project, s.id)} />}
                 {editing !== s.id && (
                   <div className="row">
                     <div className="row tight">
@@ -367,9 +368,9 @@ function CardFields({ meta, onChange }: { meta: SceneMeta; onChange: (patch: Par
   );
 }
 
-function CardSummary({ meta, fails }: { meta: SceneMeta; fails: string[] }) {
+function CardSummary({ meta, fails, ethics }: { meta: SceneMeta; fails: string[]; ethics: boolean }) {
   const link = LINKS.find((l) => l.value === meta.link)?.label;
-  if (!link && !meta.valueStart && !meta.valueEnd && !fails.length && !meta.omitted) return null;
+  if (!link && !meta.valueStart && !meta.valueEnd && !fails.length && !meta.omitted && !ethics && !meta.signoff) return null;
   return (
     <p className="card-summary">
       {meta.omitted && <span className="tag">삭제</span>}
@@ -379,11 +380,56 @@ function CardSummary({ meta, fails }: { meta: SceneMeta; fails: string[] }) {
           {meta.valueStart || '?'} → {meta.valueEnd || '?'}
         </span>
       )}
+      {meta.signoff ? (
+        <span className="tag" title={`${meta.signoff.by} 확인`}>
+          컨설턴트 확인
+        </span>
+      ) : (
+        ethics && <span className="tag tag-warn">컨설턴트 확인 필요</span>
+      )}
       {fails.length > 0 && (
         <span className="tag tag-fail" title={fails.join(' / ')}>
           점검 FAIL {fails.length}
         </span>
       )}
     </p>
+  );
+}
+
+/** 당사자 컨설턴트·감수자 확인 기록 */
+function SignoffField({ meta, required, onChange }: { meta: SceneMeta; required: boolean; onChange: (patch: Partial<SceneMeta>) => void }) {
+  const [by, setBy] = useState(() => loadMe().name);
+  const [note, setNote] = useState('');
+  const s = meta.signoff;
+  return (
+    <fieldset className="card-fields">
+      <legend>컨설턴트 확인{required && !s ? ' · 필요' : ''}</legend>
+      {s ? (
+        <div className="row">
+          <span className="small">
+            <strong>{s.by}</strong> · {new Date(s.at).toLocaleDateString('ko-KR')} 확인{s.note && ` — ${s.note}`}
+          </span>
+          <button className="small-btn" onClick={() => onChange({ signoff: undefined })}>
+            기록 지우기
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="row tight">
+            <label>
+              확인한 사람
+              <input value={by} onChange={(e) => setBy(e.target.value)} placeholder="이름 · 역할" />
+            </label>
+            <label>
+              의견
+              <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="조건부 승인 등" />
+            </label>
+          </div>
+          <button className="small-btn" disabled={!by.trim()} onClick={() => onChange({ signoff: { by: by.trim(), note: note.trim(), at: new Date().toISOString() } })}>
+            확인 기록
+          </button>
+        </>
+      )}
+    </fieldset>
   );
 }

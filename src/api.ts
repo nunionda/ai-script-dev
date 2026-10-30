@@ -1,15 +1,18 @@
 import type {
   ChatMessage,
   ChatScope,
+  ChatSummary,
   Project,
   ProjectSummary,
   Proposal,
   ProposalStatus,
   ReferenceDocument,
+  ReviewRole,
   SceneComment,
   SceneMeta,
   Snapshot,
   SnapshotSummary,
+  StructureAudit,
 } from '../shared/types';
 
 export type GeneratedCard = Required<Pick<SceneMeta, 'synopsis' | 'intent' | 'pov' | 'goal' | 'obstacle' | 'outcome' | 'valueStart' | 'valueEnd' | 'turnBy' | 'link'>>;
@@ -72,6 +75,11 @@ export const api = {
   createProposal: (id: string, sceneId: string, instruction: string) => request<Proposal>('POST', `/projects/${id}/proposals`, { sceneId, instruction }),
   setProposalStatus: (pid: string, status: ProposalStatus) => request<Proposal>('PATCH', `/proposals/${pid}`, { status }),
   deleteProposal: (pid: string) => request<void>('DELETE', `/proposals/${pid}`),
+  reviewProposal: (pid: string, role: ReviewRole) => request<Proposal>('POST', `/proposals/${pid}/reviews`, { role }),
+
+  getStructureAudit: (id: string) => request<StructureAudit | null>('GET', `/projects/${id}/audit/structure`),
+  runStructureAudit: (id: string) => request<StructureAudit>('POST', `/projects/${id}/audit/structure`),
+  summarizeChat: (id: string, sceneId: string) => request<ChatSummary>('POST', `/projects/${id}/chat/summary`, { sceneId }),
 
   listComments: (id: string) => request<SceneComment[]>('GET', `/projects/${id}/comments`),
   addComment: (id: string, c: { sceneId: string; author: string; role: string; text: string }) => request<SceneComment>('POST', `/projects/${id}/comments`, c),

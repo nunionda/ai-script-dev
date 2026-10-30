@@ -76,6 +76,19 @@ export function Writer({ sceneParam }: { sceneParam: string | null }) {
   }, [proposals, comments]);
 
   const onChange = useCallback((elements: ScriptElement[]) => update({ elements }), [update]);
+  const onUnlock = useCallback(
+    (ids: string[]) =>
+      update((p) => {
+        const elementMarks = { ...p.elementMarks };
+        for (const id of ids) {
+          const { locked: _locked, ...rest } = elementMarks[id] ?? {};
+          if (rest.play || rest.tags?.length) elementMarks[id] = rest;
+          else delete elementMarks[id];
+        }
+        return { elementMarks };
+      }),
+    [update],
+  );
   const onCursor = useCallback((info: CursorInfo) => {
     setCursor((prev) => (prev && prev.sceneId === info.sceneId && prev.type === info.type && prev.elementId === info.elementId ? prev : info));
   }, []);
@@ -230,6 +243,7 @@ export function Writer({ sceneParam }: { sceneParam: string | null }) {
               extraCharacters={extraCharacters}
               onChange={onChange}
               onCursor={onCursor}
+              onUnlock={onUnlock}
               onReady={setEditor}
             />
             <div className="paper-end" aria-hidden="true">

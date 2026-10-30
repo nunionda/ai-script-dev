@@ -9,6 +9,7 @@ import { ELEMENT_INFO, characterName, parseHeading, sceneIdAt } from '../../shar
 import { suggest } from '../../shared/suggest';
 import { fromFountain } from '../../shared/fountain';
 import {
+  LockGuard,
   ScreenplayKeymap,
   ScreenplayLayout,
   ScriptDocument,
@@ -35,6 +36,8 @@ interface Props {
   extraCharacters: string[];
   onChange: (elements: ScriptElement[]) => void;
   onCursor: (info: CursorInfo) => void;
+  /** 확정 요소를 편집하기로 했을 때 확정을 푼다 */
+  onUnlock: (ids: string[]) => void;
   onReady: (editor: Editor | null) => void;
 }
 
@@ -47,7 +50,7 @@ interface SuggestState {
   pos: number;
 }
 
-export function ScriptEditor({ initial, format, layout, extraCharacters, onChange, onCursor, onReady }: Props) {
+export function ScriptEditor({ initial, format, layout, extraCharacters, onChange, onCursor, onUnlock, onReady }: Props) {
   const formatRef = useRef(format);
   formatRef.current = format;
   const layoutRef = useRef(layout);
@@ -58,6 +61,8 @@ export function ScriptEditor({ initial, format, layout, extraCharacters, onChang
   onChangeRef.current = onChange;
   const onCursorRef = useRef(onCursor);
   onCursorRef.current = onCursor;
+  const onUnlockRef = useRef(onUnlock);
+  onUnlockRef.current = onUnlock;
 
   const [sugg, setSugg] = useState<SuggestState | null>(null);
   const suggRef = useRef<SuggestState | null>(null);
@@ -82,6 +87,10 @@ export function ScriptEditor({ initial, format, layout, extraCharacters, onChang
       ScreenplayKeymap,
       UniqueIds,
       ScreenplayLayout.configure({ getContext: () => ({ ...layoutRef.current, format: formatRef.current }) }),
+      LockGuard.configure({
+        isLocked: (id) => Boolean(layoutRef.current.marks[id]?.locked),
+        onUnlock: (ids) => onUnlockRef.current(ids),
+      }),
       Placeholder.configure({
         placeholder: ({ node }) => `${ELEMENT_INFO[node.attrs.type as ElementType].label}…`,
         showOnlyCurrent: true,

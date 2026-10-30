@@ -181,3 +181,14 @@ export function auditRevision(p: AuditSource, sceneId: string, revised: ScriptEl
   }
   return out;
 }
+
+/**
+ * 윤리·수위 검수(ETH)가 필요한 장면인가: 수위·재현 태그가 붙은 요소가 있거나 수위 메모가 적혀 있다.
+ * 이런 장면의 수정안은 ETH 검수 없이 채택하기 전에 경고한다.
+ */
+export function needsEthicsReview(p: Pick<Project, 'elements' | 'elementMarks' | 'tagCategories' | 'sceneMeta'>, sceneId: string): boolean {
+  if (p.sceneMeta[sceneId]?.ratingNote?.trim()) return true;
+  const intimacy = new Set(p.tagCategories.filter((c) => c.kind === 'intimacy').map((c) => c.id));
+  if (!intimacy.size) return false;
+  return sceneElements(p.elements, sceneId).some((e) => p.elementMarks[e.id]?.tags?.some((t) => intimacy.has(t.cat)));
+}

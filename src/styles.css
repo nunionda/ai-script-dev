@@ -1646,6 +1646,95 @@ p.banner {
   }
 }
 
+/* ---------------------------------------------------------------- role reviews · writers' room */
+.tag-warn {
+  background: var(--warn);
+  color: var(--text);
+}
+.role-reviews {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.role-reviews h2 {
+  font-size: 15px;
+  margin: 0;
+}
+.role-reviews h3 {
+  font-size: 12px;
+  margin: 10px 0 4px;
+}
+.role-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.role-buttons .code {
+  font: 600 11px/1 var(--mono);
+}
+.role-buttons .small-btn.on {
+  border-color: var(--accent);
+  background: var(--tint);
+}
+.role-buttons .small-btn.recommended {
+  border-style: dashed;
+  border-color: var(--accent);
+}
+.risk {
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  background: var(--add);
+  color: var(--add-strong);
+}
+.risk-mid {
+  background: var(--warn);
+  color: var(--text);
+}
+.risk-high {
+  background: var(--remove);
+  color: var(--remove-strong);
+}
+.role-review {
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.role-review p {
+  margin: 0;
+}
+.table-wrap {
+  overflow-x: auto;
+}
+.session-summary {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--tint);
+}
+.session-summary h3 {
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+.session-summary li {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  margin-bottom: 6px;
+}
+.session-summary p {
+  margin: 0;
+}
+
 /* ---------------------------------------------------------------- responsive */
 @media (max-width: 1100px) {
   .workspace {

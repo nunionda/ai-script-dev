@@ -1,7 +1,8 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { ConflictError, Store } from './db';
 import { AiError, aiStatus, generateProposal, generateSceneCard, streamChat, toAiError } from './ai';
-import type { ChatScope, DocumentKind, ProposalStatus } from '../shared/types';
+import { auditStructure, reviewProposal, summarizeChat } from './agents';
+import { REVIEW_ROLES, type ChatScope, type DocumentKind, type ProposalStatus, type ReviewRole } from '../shared/types';
 import { sceneElements } from '../shared/screenplay';
 import { lockedChanged } from '../shared/audit';
 import { authConfigFromEnv, createAuth, type AuthConfig } from './auth';
@@ -88,7 +89,7 @@ export function createApp(store: Store, authConfig: AuthConfig = authConfigFromE
         if (!res.writableEnded) controller.abort();
       });
       const draft = await generateProposal(project, store.listDocuments(project.id), sceneId, instruction, controller.signal);
-      const proposal = store.createProposal({ projectId: project.id, sceneId, instruction, ...draft });
+      const proposal = store.createProposal({ projectId: project.id, sceneId, instruction, ...draft, reviews: [] });
       res.status(201).json(proposal);
     }),
   );
@@ -110,6 +111,25 @@ export function createApp(store: Store, authConfig: AuthConfig = authConfigFromE
     if (!p) return res.status(404).json({ error: '수정안을 찾을 수 없습니다.' });
     res.json(p);
   });
+
+  /** 역할 검수: 같은 문서로 새로 호출해 판정만 받는다 */
+  api.post(
+    '/proposals/:pid/reviews',
+    wrap(async (req, res) => {
+      const role = req.body?.role as ReviewRole;
+      if (!REVIEW_ROLES.includes(role)) return res.status(400).json({ error: '알 수 없는 검수 역할입니다.' });
+      const proposal = store.getProposal(req.params.pid);
+      if (!proposal) return res.status(404).json({ error: '수정안을 찾을 수 없습니다.' });
+      const project = store.getProject(proposal.projectId);
+      if (!project) return res.status(404).json({ error: '작품을 찾을 수 없습니다.' });
+      const controller = new AbortController();
+      res.on('close', () => {
+        if (!res.writableEnded) controller.abort();
+      });
+      const review = await reviewProposal(project, store.listDocuments(project.id), proposal, role, controller.signal);
+      res.status(201).json(store.addProposalReview(proposal.id, review));
+    }),
+  );
 
   api.delete('/proposals/:pid', (req, res) => {
     if (!store.deleteProposal(req.params.pid)) return res.status(404).json({ error: '수정안을 찾을 수 없습니다.' });
@@ -234,6 +254,32 @@ export function createApp(store: Store, authConfig: AuthConfig = authConfigFromE
       const project = store.getProject(req.params.id);
       if (!project) return res.status(404).json({ error: '작품을 찾을 수 없습니다.' });
       res.json(await generateSceneCard(project, store.listDocuments(project.id), str(req.body?.sceneId, 100)));
+    }),
+  );
+
+  // ------------------------------------------------------------ writers' room
+  api.get('/projects/:id/audit/structure', (req, res) => res.json(store.getStructureAudit(req.params.id)));
+  api.post(
+    '/projects/:id/audit/structure',
+    wrap(async (req, res) => {
+      const project = store.getProject(req.params.id);
+      if (!project) return res.status(404).json({ error: '작품을 찾을 수 없습니다.' });
+      const controller = new AbortController();
+      res.on('close', () => {
+        if (!res.writableEnded) controller.abort();
+      });
+      const audit = await auditStructure(project, store.listDocuments(project.id), controller.signal);
+      res.status(201).json(store.saveStructureAudit(project.id, audit));
+    }),
+  );
+
+  api.post(
+    '/projects/:id/chat/summary',
+    wrap(async (req, res) => {
+      const project = store.getProject(req.params.id);
+      if (!project) return res.status(404).json({ error: '작품을 찾을 수 없습니다.' });
+      const sceneId = str(req.body?.sceneId, 100) || 'project';
+      res.json(await summarizeChat(project, store.listDocuments(project.id), store.listChat(project.id, sceneId)));
     }),
   );
 

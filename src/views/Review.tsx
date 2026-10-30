@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { CircleAlert, CircleCheck, TriangleAlert } from 'lucide-react';
-import type { OpenIssueKind, Proposal, ProposalStatus } from '../../shared/types';
-import { lockedChanged } from '../../shared/audit';
+import { CircleAlert, CircleCheck, ShieldAlert, TriangleAlert } from 'lucide-react';
+import { REVIEW_ROLES, REVIEW_ROLE_LABEL, type OpenIssueKind, type Proposal, type ProposalStatus, type ReviewRole, type RiskLevel } from '../../shared/types';
+import { lockedChanged, needsEthicsReview } from '../../shared/audit';
 import { getScenes, replaceScene, sceneElements } from '../../shared/screenplay';
 import { diffElements, summarizeDiff, type DiffOp } from '../../shared/diff';
 import { api } from '../api';
@@ -46,6 +46,10 @@ export function Review({ proposalId }: { proposalId: string | null }) {
   const changedSinceAccept = selected && scene && selected.status === 'accepted' && !sameScene(current, selected.revised);
   // 【확정】 요소를 바꾼 수정안은 채택할 수 없다 (서버도 막는다)
   const lockedBroken = selected && scene && selected.status !== 'accepted' ? lockedChanged(current, selected.revised, project.elementMarks) : [];
+  // 수위·재현 태그나 수위 메모가 있는 장면은 ETH 검수가 필요하다
+  const ethRequired = Boolean(selected && scene && needsEthicsReview(project, selected.sceneId));
+  const ethMissing = ethRequired && !selected?.reviews.some((r) => r.role === 'ETH');
+  const highRisk = selected?.reviews.filter((r) => r.risk === 'high') ?? [];
 
   const setStatus = async (p: Proposal, status: ProposalStatus) => {
     const saved = await api.setProposalStatus(p.id, status);
@@ -54,6 +58,8 @@ export function Review({ proposalId }: { proposalId: string | null }) {
 
   const accept = async () => {
     if (!selected || !scene) return;
+    if (ethMissing && !confirm('이 장면은 윤리·수위 검수(ETH)가 필요합니다. 검수 없이 채택할까요?')) return;
+    if (highRisk.length && !confirm(`${highRisk.map((r) => REVIEW_ROLE_LABEL[r.role]).join(', ')} 검수에서 위험도 '상'이 나왔습니다. 그래도 채택할까요?`)) return;
     setBusy(true);
     try {
       await flush();
@@ -154,11 +160,29 @@ export function Review({ proposalId }: { proposalId: string | null }) {
               <DiffColumn label="AI 수정안" note={STATUS_LABEL[selected.status]} ops={ops} side="b" />
             </div>
 
+            {ethMissing && selected.status !== 'accepted' && (
+              <p className="banner banner-warn">
+                <ShieldAlert aria-hidden="true" />
+                수위·재현 표시가 있는 장면입니다. 채택하기 전에 윤리·수위(ETH) 검수를 받아 주세요.
+              </p>
+            )}
+
             <ProposalReport
               proposal={selected}
               onRaise={(text) => {
                 update((p) => ({ openQuestions: [...p.openQuestions, text] }));
                 announce('열린 질문에 올렸습니다. 판정이 나면 작품 바이블의 판정서에 적어 주세요.');
+              }}
+            />
+
+            <RoleReviews
+              key={selected.id}
+              proposal={selected}
+              recommended={ethRequired ? ['STRUCT', 'ETH'] : ['STRUCT']}
+              onSaved={(saved) => setProposals((list) => list?.map((x) => (x.id === saved.id ? saved : x)) ?? null)}
+              onRaise={(text) => {
+                update((p) => ({ openQuestions: [...p.openQuestions, text] }));
+                announce('열린 질문에 올렸습니다.');
               }}
             />
 
@@ -350,5 +374,131 @@ function ProposalReport({ proposal, onRaise }: { proposal: Proposal; onRaise: (t
         )}
       </div>
     </details>
+  );
+}
+
+const RISK_LABEL: Record<RiskLevel, string> = { high: '상', mid: '중', low: '하' };
+
+/** 역할 검수: 수정안을 쓴 AI와 대화를 공유하지 않는 검수자가 판정만 한다 */
+function RoleReviews({
+  proposal,
+  recommended,
+  onSaved,
+  onRaise,
+}: {
+  proposal: Proposal;
+  recommended: ReviewRole[];
+  onSaved: (p: Proposal) => void;
+  onRaise: (text: string) => void;
+}) {
+  const [running, setRunning] = useState<ReviewRole | null>(null);
+  const [error, setError] = useState('');
+  const [open, setOpen] = useState<ReviewRole | null>(null);
+  const announce = useAnnounce();
+  const done = new Map(proposal.reviews.map((r) => [r.role, r]));
+  const shown = (open && done.get(open)) || proposal.reviews[proposal.reviews.length - 1];
+
+  const run = async (role: ReviewRole) => {
+    setRunning(role);
+    setError('');
+    try {
+      const saved = await api.reviewProposal(proposal.id, role);
+      onSaved(saved);
+      setOpen(role);
+      announce(`${REVIEW_ROLE_LABEL[role]} 검수가 끝났습니다.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '검수하지 못했습니다.');
+    } finally {
+      setRunning(null);
+    }
+  };
+
+  return (
+    <section className="role-reviews" aria-labelledby="role-reviews-title">
+      <div className="row">
+        <h2 id="role-reviews-title">역할 검수</h2>
+        <span className="muted small">검수자는 같은 문서를 새로 읽고 판정만 합니다. 원고는 바꾸지 않습니다. 검수 1회 = AI 호출 1회.</span>
+      </div>
+      <div className="role-buttons" role="group" aria-label="검수 역할">
+        {REVIEW_ROLES.map((role) => {
+          const r = done.get(role);
+          const rec = recommended.includes(role) && !r;
+          return (
+            <button
+              key={role}
+              className={`small-btn${rec ? ' recommended' : ''}${shown?.role === role ? ' on' : ''}`}
+              disabled={running !== null}
+              aria-pressed={shown?.role === role}
+              onClick={() => (r ? setOpen(role) : void run(role))}
+              title={r ? '검수 결과 보기' : '검수 실행'}
+            >
+              <span className="code">{role}</span> {REVIEW_ROLE_LABEL[role]}
+              {r && <span className={`risk risk-${r.risk}`}>{RISK_LABEL[r.risk]}</span>}
+              {rec && <span className="muted small">권장</span>}
+              {running === role && ' …'}
+            </button>
+          );
+        })}
+      </div>
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      {running && (
+        <p className="muted small" aria-live="polite">
+          {REVIEW_ROLE_LABEL[running]} 검수자가 읽는 중… (1분 정도 걸릴 수 있어요)
+        </p>
+      )}
+      {shown && (
+        <article className="role-review">
+          <div className="row">
+            <strong>
+              {shown.role} {REVIEW_ROLE_LABEL[shown.role]} · 위험도 {RISK_LABEL[shown.risk]}
+            </strong>
+            <span className="row tight">
+              <span className="muted small">{timeAgo(shown.createdAt)}</span>
+              <button className="small-btn" disabled={running !== null} onClick={() => void run(shown.role)}>
+                다시 검수
+              </button>
+            </span>
+          </div>
+          <p>{shown.summary}</p>
+          <ul className="plain-list findings">
+            {shown.verdicts.map((v) => (
+              <li key={v.code} className={`finding ${v.pass ? 'finding-pass' : 'finding-fail'}`}>
+                {v.pass ? <CircleCheck aria-hidden="true" /> : <CircleAlert aria-hidden="true" />}
+                <span className="code">{v.code}</span> {v.note}
+              </li>
+            ))}
+          </ul>
+          {shown.suggestions.length > 0 && (
+            <>
+              <h3>고칠 방향</h3>
+              <ul className="small">
+                {shown.suggestions.map((s, i) => (
+                  <li key={i}>{s}</li>
+                ))}
+              </ul>
+            </>
+          )}
+          {shown.consultantItems.length > 0 && (
+            <>
+              <h3>컨설턴트에게 확인할 것</h3>
+              <ul className="plain-list">
+                {shown.consultantItems.map((c, i) => (
+                  <li key={i} className="row">
+                    <span className="small">{c}</span>
+                    <button className="small-btn" onClick={() => onRaise(`컨설턴트 검토: ${c}`)}>
+                      열린 질문에 올리기
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </article>
+      )}
+    </section>
   );
 }

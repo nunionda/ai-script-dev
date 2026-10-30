@@ -133,17 +133,17 @@ async function ollamaParse<T extends z.ZodType>(schema: T, messages: OllamaMessa
 // ---------------------------------------------------------------- context
 
 /** 작품 문맥: 판정서·참고 문서(·원고) → 바이블. 시스템 프롬프트 맨 앞에 둔다. */
-function projectContext(project: Project, documents: ReferenceDocument[], opts: { script?: boolean } = {}): string {
+export function projectContext(project: Project, documents: ReferenceDocument[], opts: { script?: boolean } = {}): string {
   return `${documentsBlock(project, documents, opts)}\n\n${bibleBlock(project)}`;
 }
 
-function requireScene(project: Project, sceneId: string) {
+export function requireScene(project: Project, sceneId: string) {
   const sc = sceneBlock(project, sceneId);
   if (!sc) throw new AiError(404, '장면을 찾을 수 없습니다. 원고가 저장되었는지 확인해 주세요.');
   return sc;
 }
 
-function currentSceneText(sc: { label: string; text: string; card: string }, note: string): string {
+export function currentSceneText(sc: { label: string; text: string; card: string }, note: string): string {
   return `<current_scene label="S#${sc.label}" note="${note}">\n${sc.card ? `<scene_card>\n${sc.card}\n</scene_card>\n` : ''}${sc.text}\n</current_scene>`;
 }
 
@@ -276,30 +276,48 @@ export interface ProposalDraft {
   rewrites: number;
 }
 
-type Turn = { role: 'user' | 'assistant'; content: string };
+export type Turn = { role: 'user' | 'assistant'; content: string };
 
-async function parseProposal(system: string[], messages: Turn[], signal?: AbortSignal): Promise<ParsedProposal> {
+export interface StructuredOptions {
+  maxTokens: number;
+  effort: 'low' | 'medium' | 'high';
+  /** 거절 응답일 때 보일 문장 */
+  refusal: string;
+  signal?: AbortSignal;
+}
+
+/** 구조화 출력 호출. 시스템 블록의 마지막에 캐시 지점을 둔다. */
+export async function structured<T extends z.ZodType>(schema: T, system: string[], messages: Turn[], opts: StructuredOptions): Promise<z.infer<T>> {
   if (PROVIDER === 'ollama') {
-    return ollamaParse(ProposalSchema, [{ role: 'system', content: system.join('\n\n') }, ...messages], signal);
+    return ollamaParse(schema, [{ role: 'system', content: system.join('\n\n') }, ...messages], opts.signal);
   }
   const response = await getClient().beta.messages.parse(
     {
       model: MODEL,
-      max_tokens: 16000,
+      max_tokens: opts.maxTokens,
       thinking: { type: 'adaptive' },
-      output_config: { effort: 'high', format: betaZodOutputFormat(ProposalSchema) },
+      output_config: { effort: opts.effort, format: betaZodOutputFormat(schema) },
       system: system.map((text, i) =>
         i === system.length - 1 ? { type: 'text' as const, text, cache_control: { type: 'ephemeral' as const } } : { type: 'text' as const, text },
       ),
       messages,
       ...FALLBACK,
     },
-    { signal },
+    { signal: opts.signal },
   );
-  if (response.stop_reason === 'refusal') throw new AiError(422, '이 장면에 대한 수정안을 만들 수 없다는 응답을 받았습니다.');
-  if (response.stop_reason === 'max_tokens') throw new AiError(502, '수정안이 너무 길어 중간에 잘렸습니다. 요청 범위를 좁혀 주세요.');
-  if (!response.parsed_output) throw new AiError(502, '수정안 형식을 해석하지 못했습니다. 다시 시도해 주세요.');
-  return response.parsed_output;
+  if (response.stop_reason === 'refusal') throw new AiError(422, opts.refusal);
+  if (response.stop_reason === 'max_tokens') throw new AiError(502, '응답이 너무 길어 중간에 잘렸습니다. 요청 범위를 좁혀 주세요.');
+  if (!response.parsed_output) throw new AiError(502, '모델 응답 형식을 해석하지 못했습니다. 다시 시도해 주세요.');
+  return response.parsed_output as z.infer<T>;
+}
+
+function parseProposal(system: string[], messages: Turn[], signal?: AbortSignal): Promise<ParsedProposal> {
+  return structured(ProposalSchema, system, messages, {
+    maxTokens: 16000,
+    effort: 'high',
+    refusal: '이 장면에 대한 수정안을 만들 수 없다는 응답을 받았습니다.',
+    signal,
+  });
 }
 
 /**
@@ -374,30 +392,11 @@ export type GeneratedCard = z.infer<typeof CardSchema>;
 
 export async function generateSceneCard(project: Project, documents: ReferenceDocument[], sceneId: string): Promise<GeneratedCard> {
   const sc = requireScene(project, sceneId);
-  const context = projectContext(project, documents);
-  const userContent = `다음 장면의 카드를 써 주세요.\n\n${currentSceneText(sc, '카드를 쓸 장면')}`;
-  const clean = (card: GeneratedCard): GeneratedCard => ({ ...card, synopsis: card.synopsis.trim(), intent: card.intent.trim() });
-  if (PROVIDER === 'ollama') {
-    return clean(
-      await ollamaParse(CardSchema, [
-        { role: 'system', content: `${context}\n\n${CARD_INSTRUCTIONS}` },
-        { role: 'user', content: userContent },
-      ]),
-    );
-  }
-  const response = await getClient().beta.messages.parse({
-    model: MODEL,
-    max_tokens: 4000,
-    thinking: { type: 'adaptive' },
-    output_config: { effort: 'low', format: betaZodOutputFormat(CardSchema) },
-    system: [
-      { type: 'text', text: context },
-      { type: 'text', text: CARD_INSTRUCTIONS, cache_control: { type: 'ephemeral' } },
-    ],
-    messages: [{ role: 'user', content: userContent }],
-    ...FALLBACK,
-  });
-  if (response.stop_reason === 'refusal') throw new AiError(422, '이 장면의 요약을 만들 수 없다는 응답을 받았습니다.');
-  if (!response.parsed_output) throw new AiError(502, '요약 형식을 해석하지 못했습니다.');
-  return clean(response.parsed_output);
+  const card = await structured(
+    CardSchema,
+    [projectContext(project, documents), CARD_INSTRUCTIONS],
+    [{ role: 'user', content: `다음 장면의 카드를 써 주세요.\n\n${currentSceneText(sc, '카드를 쓸 장면')}` }],
+    { maxTokens: 4000, effort: 'low', refusal: '이 장면의 요약을 만들 수 없다는 응답을 받았습니다.' },
+  );
+  return { ...card, synopsis: card.synopsis.trim(), intent: card.intent.trim() };
 }

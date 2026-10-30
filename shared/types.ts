@@ -48,6 +48,14 @@ export interface SceneMeta {
   label?: string;
   /** 삭제 장면 — 번호는 남긴다 */
   omitted?: boolean;
+  /** 당사자 컨설턴트·감수자 확인 기록 */
+  signoff?: Signoff;
+}
+
+export interface Signoff {
+  by: string;
+  at: string;
+  note: string;
 }
 
 /** 판정서 항목 (R1, D12 …) */
@@ -194,6 +202,61 @@ export type SceneCard = Pick<SceneMeta, 'pov' | 'goal' | 'obstacle' | 'outcome' 
   research?: string;
 };
 
+/** 역할 검수자: 구조·인물·대사·연출·고증·윤리·전략 */
+export const REVIEW_ROLES = ['STRUCT', 'CHAR', 'DIAL', 'DIR', 'RES', 'ETH', 'STRAT'] as const;
+export type ReviewRole = (typeof REVIEW_ROLES)[number];
+export const REVIEW_ROLE_LABEL: Record<ReviewRole, string> = {
+  STRUCT: '구조',
+  CHAR: '인물',
+  DIAL: '대사',
+  DIR: '연출',
+  RES: '고증',
+  ETH: '윤리·수위',
+  STRAT: '전략',
+};
+
+export type RiskLevel = 'high' | 'mid' | 'low';
+
+/** 역할 검수자가 수정안을 읽고 낸 판정. 검수자는 원고를 고치지 않는다. */
+export interface RoleReview {
+  role: ReviewRole;
+  verdicts: ChecklistResult[];
+  risk: RiskLevel;
+  summary: string;
+  suggestions: string[];
+  /** 당사자 컨설턴트에게 확인할 항목 */
+  consultantItems: string[];
+  createdAt: string;
+}
+
+export type StructureVerdict = 'keep' | 'revise' | 'cut';
+
+/** 전체 씬 로그 인과 감사의 한 줄 */
+export interface StructureRow {
+  sceneId: string;
+  label: string;
+  link: SceneLink;
+  valueShift: boolean;
+  /** 하나의 행동의 부분인가 */
+  onAction: boolean;
+  verdict: StructureVerdict;
+  note: string;
+}
+
+export interface StructureAudit {
+  rows: StructureRow[];
+  summary: string;
+  /** 시퀀스 질문·구조 진단 */
+  issues: string[];
+  createdAt: string;
+}
+
+/** AI 대화 세션 정리 — 작가가 골라서 반영한다 */
+export interface ChatSummary {
+  decisions: string[];
+  open: string[];
+}
+
 export type ProposalStatus = 'pending' | 'accepted' | 'held' | 'rejected';
 
 export interface Proposal {
@@ -217,6 +280,8 @@ export interface Proposal {
   changeLog: string;
   /** 자기 검수 후 다시 쓴 횟수 */
   rewrites: number;
+  /** 역할 검수 결과 (역할별 최신 1개) */
+  reviews: RoleReview[];
   status: ProposalStatus;
   createdAt: string;
   updatedAt: string;

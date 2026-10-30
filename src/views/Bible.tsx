@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import { CircleAlert, Plus, Trash2, TriangleAlert } from 'lucide-react';
-import type { DocumentKind, ReferenceDocument, Ruling, TagCategory, TagKind } from '../../shared/types';
+import { CircleAlert, CircleCheck, Plus, Trash2, TriangleAlert } from 'lucide-react';
+import type { DocumentKind, Proposal, ReferenceDocument, Ruling, StructureAudit, StructureVerdict, TagCategory, TagKind } from '../../shared/types';
 import { getScenes, lockSceneNumbers, uid, unlockSceneNumbers } from '../../shared/screenplay';
-import { STAGE_LABEL, auditProject, counterStatus, motifLedger } from '../../shared/audit';
+import { STAGE_LABEL, auditProject, counterStatus, motifLedger, needsEthicsReview } from '../../shared/audit';
 import { api } from '../api';
 import { useProject } from '../state';
 import { go, projectPath, useAnnounce } from '../ui';
@@ -105,6 +105,9 @@ export function Bible() {
             </div>
           )}
         </section>
+
+        <StructureAuditCard />
+        <ConsultantList />
 
         <section className="card form">
           <h2>하나의 행동</h2>
@@ -342,6 +345,158 @@ function Documents({ projectId }: { projectId: string }) {
         <Plus aria-hidden="true" />
         문서 추가
       </button>
+    </section>
+  );
+}
+
+const VERDICT_LABEL: Record<StructureVerdict, string> = { keep: '유지', revise: '고침', cut: '삭제 후보' };
+const LINK_TEXT = { therefore: '그래서', but: '그러나', andthen: '그리고 나서' } as const;
+
+/** 전체 씬 로그 인과 감사 (STRUCT). 결과는 작품별로 마지막 1개를 저장한다. */
+function StructureAuditCard() {
+  const { project, flush } = useProject();
+  const [audit, setAudit] = useState<StructureAudit | null | undefined>(undefined);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    api.getStructureAudit(project.id).then(setAudit).catch(() => setAudit(null));
+  }, [project.id]);
+
+  const run = async () => {
+    setRunning(true);
+    setError('');
+    try {
+      await flush();
+      setAudit(await api.runStructureAudit(project.id));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '구조 감사를 하지 못했습니다.');
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const scenes = new Map(getScenes(project).map((s) => [s.id, s]));
+  return (
+    <section className="card span-2" aria-labelledby="structure-title">
+      <div className="row">
+        <h2 id="structure-title">씬 로그 인과 감사</h2>
+        <button disabled={running} onClick={() => void run()}>
+          {running ? '원고 전체를 읽는 중… (몇 분 걸릴 수 있어요)' : audit ? '다시 감사' : '감사 실행'}
+        </button>
+      </div>
+      <p className="muted small">
+        구조 검수자(STRUCT)가 원고 전체를 읽고 장면마다 연결어·가치 전환·하나의 행동과의 관계를 판정합니다. 원고는 바꾸지 않습니다. AI 호출 1회.
+      </p>
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      {audit && (
+        <>
+          <p>
+            {audit.summary} <span className="muted small">({new Date(audit.createdAt).toLocaleString('ko-KR')})</span>
+          </p>
+          {audit.issues.length > 0 && (
+            <ul className="small">
+              {audit.issues.map((x, i) => (
+                <li key={i}>{x}</li>
+              ))}
+            </ul>
+          )}
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th scope="col">장면</th>
+                  <th scope="col">연결</th>
+                  <th scope="col">가치 전환</th>
+                  <th scope="col">하나의 행동</th>
+                  <th scope="col">판정</th>
+                  <th scope="col">근거</th>
+                </tr>
+              </thead>
+              <tbody>
+                {audit.rows.map((r) => {
+                  const s = scenes.get(r.sceneId);
+                  return (
+                    <tr key={r.sceneId}>
+                      <th scope="row">
+                        <button className="link-btn" onClick={() => go(projectPath(project.id, 'write', r.sceneId))}>
+                          S#{s?.label ?? r.label}
+                        </button>
+                        <span className="muted small"> {s?.parts.location}</span>
+                      </th>
+                      <td className={r.link === 'andthen' ? 'fail-text' : undefined}>{LINK_TEXT[r.link]}</td>
+                      <td className={r.valueShift ? undefined : 'fail-text'}>{r.valueShift ? '있음' : '없음'}</td>
+                      <td className={r.onAction ? undefined : 'fail-text'}>{r.onAction ? '부분' : '아님'}</td>
+                      <td>
+                        <span className={`tag${r.verdict === 'cut' ? ' tag-fail' : r.verdict === 'revise' ? ' tag-warn' : ''}`}>{VERDICT_LABEL[r.verdict]}</span>
+                      </td>
+                      <td className="small">{r.note}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+/** 컨설턴트 검토 목록: 수위·재현 장면의 확인 상태와 검수자가 모은 질문 */
+function ConsultantList() {
+  const { project } = useProject();
+  const [proposals, setProposals] = useState<Proposal[]>([]);
+  useEffect(() => {
+    api.listProposals(project.id).then(setProposals).catch(() => undefined);
+  }, [project.id]);
+  const scenes = getScenes(project);
+  const label = new Map(scenes.map((s) => [s.id, s.label]));
+  const needed = scenes.filter((s) => !s.meta.omitted && (needsEthicsReview(project, s.id) || s.meta.signoff));
+  const questions = proposals.flatMap((p) =>
+    p.status === 'rejected' ? [] : p.reviews.flatMap((r) => r.consultantItems.map((text) => ({ sceneId: p.sceneId, role: r.role, text, proposal: p.id }))),
+  );
+  if (!needed.length && !questions.length) return null;
+  return (
+    <section className="card span-2" aria-labelledby="consultant-title">
+      <h2 id="consultant-title">컨설턴트 검토 목록</h2>
+      <p className="muted small">수위·재현 태그나 수위 메모가 있는 장면, 그리고 역할 검수에서 나온 확인 질문입니다. 확인 기록은 보드의 장면 카드에서 남깁니다.</p>
+      {needed.length > 0 && (
+        <ul className="plain-list findings">
+          {needed.map((s) => (
+            <li key={s.id} className={`finding ${s.meta.signoff ? 'finding-pass' : 'finding-warn'}`}>
+              {s.meta.signoff ? <CircleCheck aria-hidden="true" /> : <TriangleAlert aria-hidden="true" />}
+              <button className="link-btn" onClick={() => go(projectPath(project.id, 'board'))}>
+                S#{s.label} {s.parts.location}
+              </button>
+              <span className="small">
+                {s.meta.signoff
+                  ? `${s.meta.signoff.by} · ${new Date(s.meta.signoff.at).toLocaleDateString('ko-KR')} 확인${s.meta.signoff.note ? ` — ${s.meta.signoff.note}` : ''}`
+                  : '확인 필요'}
+                {s.meta.ratingNote && ` · 수위 메모: ${s.meta.ratingNote}`}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {questions.length > 0 && (
+        <>
+          <h3>검수자가 모은 질문</h3>
+          <ul className="plain-list">
+            {questions.map((q, i) => (
+              <li key={i} className="small">
+                <button className="link-btn" onClick={() => go(projectPath(project.id, 'review', q.proposal))}>
+                  S#{label.get(q.sceneId) ?? '?'} · {q.role}
+                </button>{' '}
+                {q.text}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </section>
   );
 }

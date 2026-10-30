@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { carryIds, el, getScenes, lockSceneNumbers, printableElements, sceneElements } from './screenplay';
-import { auditProject, auditRevision, counterStatus, lockedChanged, motifLedger } from './audit';
+import { auditProject, auditRevision, counterStatus, lockedChanged, motifLedger, needsEthicsReview } from './audit';
 import { bibleDefaults } from './sample';
 import { documentsBlock, bibleBlock, formatElements } from '../server/prompts';
 import type { Project, ScriptElement } from './types';
@@ -109,6 +109,16 @@ describe('audit', () => {
     const play = { ...p, elementMarks: { [d2.id]: { play: true } } };
     expect(auditProject(play).map((x) => x.code)).toEqual(['C8']);
     expect(auditProject(project([...base, el('character', '민석 (E)')], { auditOptions: { banVoiceOver: true, requireSceneCard: false } }))).toEqual([]);
+  });
+});
+
+describe('ethics review', () => {
+  it('requires ETH for scenes with intimacy tags or a rating note', () => {
+    const cats = [{ id: 'touch', name: '노출·접촉', kind: 'intimacy' as const }];
+    expect(needsEthicsReview(project(base, { tagCategories: cats }), s1.id)).toBe(false);
+    expect(needsEthicsReview(project(base, { tagCategories: cats, elementMarks: { [a1.id]: { tags: [{ cat: 'touch' }] } } }), s1.id)).toBe(true);
+    expect(needsEthicsReview(project(base, { tagCategories: cats, elementMarks: { [a1.id]: { tags: [{ cat: 'touch' }] } } }), s2.id)).toBe(false);
+    expect(needsEthicsReview(project(base, { sceneMeta: { [s3.id]: { ratingNote: '상반신 노출 없음' } } }), s3.id)).toBe(true);
   });
 });
 

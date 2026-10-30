@@ -5,7 +5,7 @@ import { Store } from './db';
 import { createApp } from './app';
 import type { Project } from '../shared/types';
 
-const emptyReview = { quotes: [], sceneCard: {}, antiCliche: [], selfReview: [], audit: [], openIssues: [], changeLog: '', rewrites: 0 };
+const emptyReview = { quotes: [], sceneCard: {}, antiCliche: [], selfReview: [], audit: [], openIssues: [], changeLog: '', rewrites: 0, reviews: [] };
 
 let server: Server;
 let base = '';
@@ -129,6 +129,27 @@ describe('snapshots, comments, proposals', () => {
     const p = store.createProject({ title: '옛 작품', decisions: ['감정은 행동으로.'] } as never);
     expect(p.rulings).toEqual([{ id: 'legacy-d1', code: 'D1', text: '감정은 행동으로.' }]);
     store.deleteProject(p.id);
+  });
+
+  it('validates role reviews and keeps the latest review per role', async () => {
+    const [summary] = store.listProjects();
+    const p = store.createProposal({ projectId: summary.id, sceneId: 's', title: 't', instruction: '', rationale: '', original: [], revised: [], ...emptyReview });
+    expect((await call('POST', `/proposals/${p.id}/reviews`, { role: 'BOGUS' })).status).toBe(400);
+    expect((await call('POST', '/proposals/nope/reviews', { role: 'ETH' })).status).toBe(404);
+    const review = (risk: 'high' | 'low') => ({ role: 'ETH' as const, verdicts: [], risk, summary: '', suggestions: [], consultantItems: [], createdAt: '' });
+    store.addProposalReview(p.id, review('high'));
+    const saved = store.addProposalReview(p.id, review('low'))!;
+    expect(saved.reviews.map((r) => r.risk)).toEqual(['low']);
+    expect((await call('GET', '/projects')).status).toBe(200);
+  });
+
+  it('stores the structure audit and refuses empty work before calling AI', async () => {
+    const empty = (await call('POST', '/projects', { title: '빈 작품', elements: [] })).body as Project;
+    expect((await call('GET', `/projects/${empty.id}/audit/structure`)).body).toBeNull();
+    expect((await call('POST', `/projects/${empty.id}/chat/summary`, { sceneId: 'project' })).status).toBe(400);
+    store.saveStructureAudit(empty.id, { rows: [], summary: '첫 감사', issues: [], createdAt: '' });
+    store.saveStructureAudit(empty.id, { rows: [], summary: '두 번째', issues: [], createdAt: '' });
+    expect((await call('GET', `/projects/${empty.id}/audit/structure`)).body.summary).toBe('두 번째');
   });
 
   it('returns 404 for unknown API routes', async () => {

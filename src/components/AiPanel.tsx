@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, LockKeyhole, Send, Share2, Sparkles, Square, Trash2, Wand2 } from 'lucide-react';
-import type { ChatMessage, ChatScope, SceneComment } from '../../shared/types';
+import { Check, ListChecks, LockKeyhole, Send, Share2, Sparkles, Square, Trash2, Wand2 } from 'lucide-react';
+import type { ChatMessage, ChatScope, ChatSummary, SceneComment } from '../../shared/types';
+import { uid } from '../../shared/screenplay';
 import { api, sendChat } from '../api';
-import { loadMe, saveMe, usePref, type Me } from '../state';
+import { loadMe, saveMe, useProject, usePref, type Me } from '../state';
 import { Markdown } from './Markdown';
 import { go, projectPath, timeAgo, useAnnounce } from '../ui';
 
@@ -69,6 +70,8 @@ function AiChat({
   const [proposalOpen, setProposalOpen] = useState(false);
   const [instruction, setInstruction] = useState('');
   const [proposing, setProposing] = useState(false);
+  const [summary, setSummary] = useState<ChatSummary | null>(null);
+  const [summarizing, setSummarizing] = useState(false);
   const abort = useRef<AbortController | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const announce = useAnnounce();
@@ -78,6 +81,7 @@ function AiChat({
     let alive = true;
     setMessages([]);
     setError('');
+    setSummary(null);
     api
       .listChat(projectId, sceneId)
       .then((m) => alive && setMessages(m))
@@ -145,6 +149,18 @@ function AiChat({
     }
   };
 
+  const summarize = async () => {
+    setSummarizing(true);
+    setError('');
+    try {
+      setSummary(await api.summarizeChat(projectId, sceneId));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '대화를 정리하지 못했습니다.');
+    } finally {
+      setSummarizing(false);
+    }
+  };
+
   const lastUser = [...messages].reverse().find((m) => m.role === 'user')?.content ?? '';
 
   return (
@@ -192,6 +208,8 @@ function AiChat({
           </div>
         )}
       </div>
+
+      {summary && <SessionSummary summary={summary} onClose={() => setSummary(null)} />}
 
       {error && (
         <p className="error" role="alert">
@@ -270,6 +288,12 @@ function AiChat({
       <div className="ai-footer">
         <LockKeyhole aria-hidden="true" />
         AI 논의는 이 작품에만 저장됩니다 · 선택한 답변만 팀과 공유
+        {messages.length > 0 && streaming === null && (
+          <button className="link-btn" disabled={summarizing} onClick={() => void summarize()} title="결정 후보와 미결 사항으로 정리 (AI 호출 1회)">
+            <ListChecks aria-hidden="true" />
+            {summarizing ? '정리 중…' : '세션 정리'}
+          </button>
+        )}
         {messages.length > 0 && streaming === null && (
           <button
             className="link-btn"
@@ -366,6 +390,83 @@ function TeamComments({ projectId, sceneId, comments, onChange }: { projectId: s
           의견 남기기
         </button>
       </form>
+    </div>
+  );
+}
+
+/** 세션 정리: 결정 후보는 판정서로, 미결 사항은 열린 질문으로 — 작가가 고른 것만 반영한다 */
+function SessionSummary({ summary, onClose }: { summary: ChatSummary; onClose: () => void }) {
+  const { project, update } = useProject();
+  const announce = useAnnounce();
+  const [used, setUsed] = useState<Set<string>>(new Set());
+  const mark = (key: string) => setUsed((s) => new Set(s).add(key));
+
+  const addRuling = (text: string) => {
+    update((p) => {
+      const nums = p.rulings.filter((r) => /^D/i.test(r.code)).map((r) => Number(r.code.replace(/\D/g, '')) || 0);
+      return { rulings: [...p.rulings, { id: uid('d'), code: `D${(nums.length ? Math.max(...nums) : 0) + 1}`, text }] };
+    });
+    announce('판정서에 추가했습니다.');
+  };
+  const addQuestion = (text: string) => {
+    update((p) => ({ openQuestions: [...p.openQuestions, text] }));
+    announce('열린 질문에 추가했습니다.');
+  };
+  const already = (text: string) => project.rulings.some((r) => r.text.trim() === text) || project.openQuestions.includes(text);
+
+  return (
+    <div className="session-summary" role="region" aria-label="세션 정리">
+      <div className="row">
+        <strong>세션 정리</strong>
+        <button className="link-btn" onClick={onClose}>
+          닫기
+        </button>
+      </div>
+      {!summary.decisions.length && !summary.open.length && <p className="muted small">정리할 결정이나 미결 사항이 없습니다.</p>}
+      {summary.decisions.length > 0 && (
+        <>
+          <h3>결정 후보</h3>
+          <ul className="plain-list">
+            {summary.decisions.map((d, i) => (
+              <li key={`d${i}`}>
+                <p className="small">{d}</p>
+                <button
+                  className="small-btn"
+                  disabled={used.has(`d${i}`) || already(d)}
+                  onClick={() => {
+                    addRuling(d);
+                    mark(`d${i}`);
+                  }}
+                >
+                  판정서에 추가
+                </button>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {summary.open.length > 0 && (
+        <>
+          <h3>미결 사항</h3>
+          <ul className="plain-list">
+            {summary.open.map((q, i) => (
+              <li key={`o${i}`}>
+                <p className="small">{q}</p>
+                <button
+                  className="small-btn"
+                  disabled={used.has(`o${i}`) || already(q)}
+                  onClick={() => {
+                    addQuestion(q);
+                    mark(`o${i}`);
+                  }}
+                >
+                  열린 질문에 추가
+                </button>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </div>
   );
 }

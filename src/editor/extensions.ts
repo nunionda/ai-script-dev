@@ -312,3 +312,57 @@ export function focusElement(editor: Editor, id: string, block: ScrollLogicalPos
   const dom = editor.view.nodeDOM(target);
   if (dom instanceof HTMLElement) dom.scrollIntoView({ block, behavior: 'smooth' });
 }
+
+// ---------------------------------------------------------------- 【확정】 요소 편집 확인
+
+export interface LockGuardOptions {
+  isLocked: (id: string) => boolean;
+  /** 작가가 확정을 풀고 편집하기로 했을 때 */
+  onUnlock: (ids: string[]) => void;
+}
+
+/** 확정 요소의 문장·종류가 바뀌거나 지워지는 편집은 확인을 받고, 승인하면 확정을 푼다. */
+export const LockGuard = Extension.create<LockGuardOptions>({
+  name: 'lockGuard',
+  addOptions() {
+    return { isLocked: () => false, onUnlock: () => undefined };
+  },
+  addProseMirrorPlugins() {
+    const { isLocked, onUnlock } = this.options;
+    const editor = this.editor;
+    // React 상태가 갱신되기 전 다음 입력에서 다시 묻지 않도록
+    const released = new Set<string>();
+    return [
+      new Plugin({
+        filterTransaction: (tr, state) => {
+          if (!tr.docChanged) return true;
+          // 확정이 실제로 풀린 요소는 목록에서 뺀다 — 다시 확정하면 다시 묻는다
+          for (const id of released) if (!isLocked(id)) released.delete(id);
+          const before = new Map<string, string>();
+          state.doc.forEach((n) => {
+            const id = n.attrs.id as string;
+            if (id && isLocked(id) && !released.has(id)) before.set(id, `${n.attrs.type}|${n.textContent}`);
+          });
+          if (!before.size) return true;
+          const after = new Map<string, string>();
+          tr.doc.forEach((n) => {
+            const id = n.attrs.id as string;
+            if (before.has(id)) after.set(id, `${n.attrs.type}|${n.textContent}`);
+          });
+          const changed = [...before].filter(([id, v]) => after.get(id) !== v).map(([id]) => id);
+          if (!changed.length) return true;
+          if (confirm(`작가 확정 표현 ${changed.length}곳을 고칩니다. 확정을 풀고 편집할까요?`)) {
+            changed.forEach((id) => released.add(id));
+            onUnlock(changed);
+            return true;
+          }
+          // 입력이 이미 화면(DOM)에 반영된 경우 상태대로 다시 그린다
+          setTimeout(() => {
+            if (!editor.isDestroyed) editor.view.dispatch(editor.state.tr.setMeta(layoutKey, true));
+          });
+          return false;
+        },
+      }),
+    ];
+  },
+});

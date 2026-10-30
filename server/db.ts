@@ -9,6 +9,7 @@ import type {
   ElementMark,
   OpenIssue,
   ReferenceDocument,
+  RoleReview,
   Ruling,
   SceneCard,
   TagCategory,
@@ -19,6 +20,7 @@ import type {
   SceneComment,
   Snapshot,
   SnapshotSummary,
+  StructureAudit,
 } from '../shared/types';
 import { normalizeElements, uid } from '../shared/screenplay';
 import { paginate } from '../shared/pagination';
@@ -222,6 +224,10 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS idx_chat_project_scene ON chat(project_id, scene_id);
       CREATE INDEX IF NOT EXISTS idx_documents_project ON documents(project_id);
+      CREATE TABLE IF NOT EXISTS structure_audits (
+        project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+        data TEXT NOT NULL
+      );
     `);
   }
 
@@ -360,6 +366,7 @@ export class Store {
       openIssues: (Array.isArray(data.openIssues) ? data.openIssues : []) as OpenIssue[],
       changeLog: typeof data.changeLog === 'string' ? data.changeLog : '',
       rewrites: typeof data.rewrites === 'number' ? data.rewrites : 0,
+      reviews: (Array.isArray(data.reviews) ? data.reviews : []) as RoleReview[],
       createdAt: r.created_at as string,
       updatedAt: r.updated_at as string,
     };
@@ -390,8 +397,33 @@ export class Store {
     return this.getProposal(id);
   }
 
+  /** 역할별 최신 검수 하나만 남긴다 */
+  addProposalReview(id: string, review: RoleReview): Proposal | null {
+    const r = this.db.prepare('SELECT data FROM proposals WHERE id = ?').get(id) as { data: string } | undefined;
+    if (!r) return null;
+    const data = JSON.parse(r.data);
+    const reviews = (Array.isArray(data.reviews) ? data.reviews : []) as RoleReview[];
+    data.reviews = [...reviews.filter((x) => x.role !== review.role), review];
+    this.db.prepare('UPDATE proposals SET data = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(data), new Date().toISOString(), id);
+    return this.getProposal(id);
+  }
+
   deleteProposal(id: string): boolean {
     return Number(this.db.prepare('DELETE FROM proposals WHERE id = ?').run(id).changes) > 0;
+  }
+
+  // ------------------------------------------------------------ structure audit
+
+  getStructureAudit(projectId: string): StructureAudit | null {
+    const r = this.db.prepare('SELECT data FROM structure_audits WHERE project_id = ?').get(projectId) as { data: string } | undefined;
+    return r ? (JSON.parse(r.data) as StructureAudit) : null;
+  }
+
+  saveStructureAudit(projectId: string, audit: StructureAudit): StructureAudit {
+    this.db
+      .prepare('INSERT INTO structure_audits (project_id, data) VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET data = excluded.data')
+      .run(projectId, JSON.stringify(audit));
+    return audit;
   }
 
   // ------------------------------------------------------------ documents
