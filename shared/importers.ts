@@ -338,6 +338,12 @@ const TRANSITION_RE = /^(?:(?:CUT|SMASH CUT|MATCH CUT|DISSOLVE|FADE)(?: (?:TO|IN
 const CUE_EXT = /\s*\((?:V\.?O\.?|O\.?S\.?|O\.?C\.?|E|F|CONT'D|소리|목소리|전화|이어서)\)\s*$/i;
 /** 막 제목: "1막 떠나온 세계", "제2막", "ACT II" */
 const ACT_RE = /^(?:제\s*)?\d+\s*막(?:\s|$|[.:])|^ACT\s+(?:[IVX]+|\d+)\b/i;
+/** 이름: "동하", "형사 1", "도솔(Na)", "지훈 (V.O.)" */
+const NAME = String.raw`[가-힣A-Za-z0-9·]{1,12}(?: [가-힣A-Za-z0-9·]{1,10})?(?:\s?\([^)\n]{1,12}\))?`;
+/** "이름⇥(괄호) 대사" — 이름 칸과 대사 칸을 탭(또는 PDF의 넓은 간격)으로 나눈 원고 */
+const TAB_DIALOGUE_RE = new RegExp(String.raw`^(${NAME})\t+(?:(\([^)]*\))\s*)?(.+)$`, 's');
+/** 번호만 붙은 씬 헤딩: "3. 고급 펜션, 욕실 (오후/눈)", "1. 모니터 앞 – D" */
+const NUMBERED_SCENE_RE = /^\d+(?:-\d+|[A-Z])?\.\s*[^\s\d.][^\n]{0,58}$/;
 /** "이름 : 대사", "이름: (괄호) 대사" — 한국 원고에서 흔한 형태 */
 const INLINE_DIALOGUE_RE = /^([가-힣A-Za-z0-9·]{1,12}(?: [가-힣A-Za-z0-9·]{1,10})?(?:\s?\((?:V\.?O\.?|O\.?S\.?|E|F|소리|목소리|전화)\))?)\s*[:：]\s*(?:(\([^)]*\))\s*)?(.+)$/;
 
@@ -367,7 +373,17 @@ export function fromParagraphs(paras: Paragraph[]): ImportResult {
   for (const p of sceneLike) if (p.style) styleCount.set(p.style, (styleCount.get(p.style) ?? 0) + 1);
   const [topStyle, topCount] = [...styleCount].sort((a, b) => b[1] - a[1])[0] ?? ['', 0];
   const sceneStyle = topCount >= 3 && topCount >= sceneLike.length * 0.4 ? topStyle : '';
-  const isSceneLine = (p: Paragraph) => SCENE_RE.test(p.text.trim()) && !p.text.trim().includes('\n') && (!sceneStyle || p.style === sceneStyle);
+  // 번호만 붙은 씬 헤딩은 문서 안에서 번호가 차례로 늘어날 때만 씬 헤딩으로 본다 (번호 목록과 구분)
+  const nums = clean.map((p) => p.text.trim()).filter((t) => NUMBERED_SCENE_RE.test(t)).map((t) => parseInt(t, 10));
+  const rising = nums.slice(1).filter((n, k) => n > nums[k]).length;
+  // S#·INT.·내부 같은 정식 씬 헤딩이 있는 원고에서는 쓰지 않는다 (기획안의 "1. 로그라인" 같은 번호 목록)
+  const numberedScenes = sceneLike.length < 3 && nums.length >= 3 && rising >= (nums.length - 1) * 0.7;
+  const isSceneLine = (p: Paragraph) => {
+    const t = p.text.trim();
+    if (t.includes('\n')) return false;
+    if (SCENE_RE.test(t)) return !sceneStyle || p.style === sceneStyle;
+    return numberedScenes && NUMBERED_SCENE_RE.test(t);
+  };
 
   let firstScene = clean.findIndex((p) => {
     if (useStyles && p.style) return STYLE_TYPE.find(([re]) => re.test(p.style!))?.[1] === 'scene';
@@ -385,7 +401,8 @@ export function fromParagraphs(paras: Paragraph[]): ImportResult {
 
   let pendingAct: string | null = null;
   const push = (type: ElementType, text: string) => {
-    const e = el(type, text);
+    // 쪽을 넘어가며 붙는 "(CONT'D)"는 이름이 아니다
+    const e = el(type, type === 'character' ? text.replace(/\s*\((?:CONT['’]?D|계속|이어서)\)\s*$/i, '') : text);
     result.elements.push(e);
     // 막 제목 바로 뒤의 장면이 그 막을 연다
     if (type === 'scene' && pendingAct) {
@@ -397,7 +414,8 @@ export function fromParagraphs(paras: Paragraph[]): ImportResult {
   const last = (): ScriptElement | undefined => result.elements[result.elements.length - 1];
   // 앞의 장면 번호를 떼고, 할리우드 원고의 오른쪽 장면 번호("INT. ROOM - DAY 12")도 뗀다
   const heading = (t: string) => {
-    const h = t.replace(SCENE_NUMBER_RE, '').trim() || t.trim();
+    let h = t.replace(SCENE_NUMBER_RE, '').trim() || t.trim();
+    if (numberedScenes && NUMBERED_SCENE_RE.test(h)) h = h.replace(/^\d+(?:-\d+|[A-Z])?\.\s*/, '');
     return /^(INT|EXT|EST|I\/E)/i.test(h) ? h.replace(/\s+\d+[A-Z]?\.?$/, '') : h;
   };
 
@@ -414,7 +432,7 @@ export function fromParagraphs(paras: Paragraph[]): ImportResult {
       continue;
     }
     // 쪽 번호·머리말 흔적
-    if (/^\d+\.?$/.test(text) || /^-\s*\d+\s*-$/.test(text) || /^\(?(MORE|계속)\)?$/i.test(text)) continue;
+    if (/^\d+\.?$/.test(text) || /^-\s*\d+\s*-$/.test(text) || /^[-–—_=.·•\s]+$/.test(text) || /^\(?(MORE|계속)\)?$/i.test(text)) continue;
     // 막 제목: "1막 …", "제2막", "ACT II"
     if (ACT_RE.test(text) && text.length <= 60) {
       const act = { id: uid('a'), title: text };
@@ -457,11 +475,16 @@ export function fromParagraphs(paras: Paragraph[]): ImportResult {
         continue;
       }
       inDialogue = false;
-      const inlineCue = text.match(INLINE_DIALOGUE_RE);
+      const inlineCue = text.match(INLINE_DIALOGUE_RE) ?? text.match(TAB_DIALOGUE_RE);
       if (inlineCue) {
         push('character', inlineCue[1].trim());
         if (inlineCue[2]) push('parenthetical', inlineCue[2]);
         push('dialogue', inlineCue[3].trim());
+        continue;
+      }
+      // 빈 줄 없이 바로 이어지는 들여쓴 줄은 앞 대사의 다음 줄 (빈 줄로 덩어리를 나누는 원고에서만)
+      if (blockMode && last()?.type === 'dialogue' && body[i - 1]?.text.trim() && p.indent > 0.05) {
+        last()!.text += `\n${text}`;
         continue;
       }
       push('action', text);
@@ -477,7 +500,7 @@ export function fromParagraphs(paras: Paragraph[]): ImportResult {
       continue;
     }
     // 탭으로 이름과 대사를 나눈 원고
-    const tab = text.match(/^([가-힣A-Za-z0-9·]{1,12})\t+(?:(\([^)]*\))\s*)?(.+)$/s);
+    const tab = text.match(TAB_DIALOGUE_RE);
     if (tab) {
       push('character', tab[1]);
       if (tab[2]) push('parenthetical', tab[2]);
@@ -547,6 +570,8 @@ export async function importBinary(kind: 'docx' | 'hwpx' | 'hwp', data: Uint8Arr
 
 export interface PdfPage {
   height: number;
+  /** 쪽 폭(pt). 글이 적은 쪽에서 본문 폭을 가늠하는 데 쓴다 */
+  width?: number;
   items: { text: string; x: number; y: number; w: number; size: number }[];
 }
 
@@ -565,17 +590,41 @@ interface PdfLine {
 export function pdfTextToParagraphs(pages: PdfPage[]): Paragraph[] {
   const out: Paragraph[] = [];
   let chars = 0;
-  for (const page of pages) {
-    const items = [...page.items].sort((a, b) => b.y - a.y || a.x - b.x);
-    const lines: PdfLine[] = [];
-    for (const it of items) {
-      const cur = lines[lines.length - 1];
-      if (cur && Math.abs(cur.y - it.y) <= it.size * 0.4) {
-        const gap = it.x - cur.right;
-        cur.text += (gap > it.size * 0.2 && !cur.text.endsWith(' ') ? ' ' : '') + it.text;
-        cur.right = Math.max(cur.right, it.x + it.w);
-      } else lines.push({ y: it.y, x: it.x, right: it.x + it.w, size: it.size, text: it.text });
+  // 거의 모든 쪽의 같은 자리에 반복되는 글(머리말·꼬리말·워터마크)은 본문이 아니다.
+  // 자리까지 같아야 한다 — "CUT TO:"처럼 쪽마다 다른 자리에 나오는 본문은 남긴다
+  const spot = (i: PdfPage['items'][number]) => `${i.text.trim()}@${Math.round(i.x / 4)},${Math.round(i.y / 4)}`;
+  const repeated = new Set<string>();
+  if (pages.length >= 3) {
+    const seen = new Map<string, number>();
+    for (const page of pages) for (const k of new Set(page.items.filter((i) => i.text.trim().length >= 2).map(spot))) seen.set(k, (seen.get(k) ?? 0) + 1);
+    // 짧은 글(워터마크 이름 등)은 더 많은 쪽에서 반복될 때만 지운다
+    for (const [k, n] of seen) {
+      const long = k.indexOf('@') >= 6;
+      if (long ? n >= pages.length * 0.6 : pages.length >= 8 && n >= pages.length * 0.8) repeated.add(k);
     }
+  }
+  for (const page of pages) {
+    const items = page.items.filter((i) => !repeated.has(spot(i))).sort((a, b) => b.y - a.y || a.x - b.x);
+    // 같은 높이의 조각을 한 줄로 모은다
+    const rows: { y: number; size: number; parts: typeof items }[] = [];
+    for (const it of items) {
+      const cur = rows[rows.length - 1];
+      if (cur && Math.abs(cur.y - it.y) <= it.size * 0.4) cur.parts.push(it);
+      else rows.push({ y: it.y, size: it.size, parts: [it] });
+    }
+    const lines: PdfLine[] = rows.map((row) => {
+      const parts = row.parts.sort((a, b) => a.x - b.x);
+      const gaps = parts.slice(1).map((it, k) => it.x - (parts[k].x + parts[k].w));
+      const wide = gaps.map((g) => g > row.size * 1.5);
+      // 이름 칸과 대사 칸 사이의 넓은 간격 하나만 탭으로 남긴다. 양쪽 정렬로 넓어진 단어 간격(여러 개)은 공백
+      const tabAt = wide.filter(Boolean).length === 1 && wide[0] ? 0 : -1;
+      let text = parts[0].text;
+      parts.slice(1).forEach((it, k) => {
+        const sep = k === tabAt ? '\t' : gaps[k] > row.size * 0.2 && !text.endsWith(' ') && !it.text.startsWith(' ') ? ' ' : '';
+        text = (sep === '\t' ? text.replace(/ +$/, '') : text) + sep + (sep === '\t' ? it.text.replace(/^ +/, '') : it.text);
+      });
+      return { y: row.y, x: parts[0].x, right: Math.max(...parts.map((p) => p.x + p.w)), size: row.size, text };
+    });
     // 머리말·꼬리말의 쪽 번호 ("12." / "제목 / 12")
     const body = lines.filter((l) => !((l.y > page.height * 0.9 || l.y < page.height * 0.07) && /(^|\/\s*)\d+\.?$/.test(l.text.trim()) && l.text.length < 60));
     if (!body.length) continue;
@@ -584,7 +633,8 @@ export function pdfTextToParagraphs(pages: PdfPage[]): Paragraph[] {
     const xs = body.map((l) => l.x).sort((a, b) => a - b);
     const left = xs[Math.floor(xs.length * 0.1)];
     const rightEdge = Math.max(...body.map((l) => l.right));
-    const width = Math.max(1, rightEdge - left);
+    // 본문 폭: 보이는 글의 폭과, 쪽 폭에서 오른쪽 여백 1인치를 뺀 폭 가운데 큰 쪽 (글이 적은 쪽 대비)
+    const width = Math.max(1, rightEdge - left, page.width ? page.width - left - 72 : 0);
     const gaps = body
       .slice(1)
       .map((l, i) => body[i].y - l.y)
@@ -598,9 +648,12 @@ export function pdfTextToParagraphs(pages: PdfPage[]): Paragraph[] {
       const gap = prev ? prev.y - l.y : Infinity;
       const sameColumn = prev !== null && Math.abs(prev.x - l.x) < width * 0.03;
       // 오른쪽 끝까지 찬 줄은 다음 줄로 이어진다 (내어쓰기한 "이름: 대사"의 둘째 줄 등)
-      const prevFull = prev !== null && prev.right >= rightEdge - width * 0.08 && l.x >= left - width * 0.02;
+      // 단, 오른쪽으로 크게 들여 쓴 짧은 이름 줄(인물)은 앞 줄에 붙이지 않는다 — 쪽에 글이 적으면 지문 줄이 "가득 찬 줄"로 보일 수 있다
+      const cueLike = prev !== null && l.x - prev.x > width * 0.2 && looksLikeCue(l.text, 'x');
+      const prevFull = prev !== null && !cueLike && prev.right >= rightEdge - width * 0.08 && l.x >= left - width * 0.02;
       const cur = out[out.length - 1];
-      if (prev && cur?.text && gap <= lineGap * 1.35 && (sameColumn || prevFull) && !/^\(/.test(l.text.trim()) && !SCENE_RE.test(l.text.trim()) && !INLINE_DIALOGUE_RE.test(l.text.trim())) {
+      const curIsHeading = Boolean(cur?.text && (SCENE_RE.test(cur.text) || NUMBERED_SCENE_RE.test(cur.text)) && !prevFull);
+      if (prev && cur?.text && !curIsHeading && gap <= lineGap * 1.35 && (sameColumn || prevFull) && !/^\(/.test(l.text.trim()) && !SCENE_RE.test(l.text.trim()) && !INLINE_DIALOGUE_RE.test(l.text.trim()) && !TAB_DIALOGUE_RE.test(l.text.trim()) && !NUMBERED_SCENE_RE.test(l.text.trim())) {
         cur.text += ` ${l.text.trim()}`;
       } else {
         if (prev && gap > lineGap * 1.35) out.push({ text: '' });

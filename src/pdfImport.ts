@@ -12,6 +12,7 @@ export async function pdfParagraphs(data: Uint8Array): Promise<Paragraph[]> {
     const content = await page.getTextContent();
     pages.push({
       height: page.getViewport({ scale: 1 }).height,
+      width: page.getViewport({ scale: 1 }).width,
       items: content.items.flatMap((i) =>
         'str' in i && i.str.trim() ? [{ text: i.str, x: i.transform[4], y: i.transform[5], w: i.width, size: Math.abs(i.transform[3]) || i.height || 10 }] : [],
       ),

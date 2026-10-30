@@ -187,6 +187,73 @@ describe('import', () => {
     expect(() => pdfTextToParagraphs([{ height: 800, items: [] }])).toThrow(/스캔/);
   });
 
+  it('reads a Final Draft style PDF (US Letter, Courier 12, standard indents)', () => {
+    // Final Draft 기본 위치(pt): 왼쪽 여백 108, 대사 180, 괄호 223, 인물 266, 오른쪽 끝 540, 장면 번호 양쪽 여백
+    const ch = 7.2; // Courier 12의 글자 폭
+    const item = (text: string, x: number, y: number) => ({ text, x, y, w: text.length * ch, size: 12 });
+    const page1 = [
+      item('1', 72, 720), item('INT. KITCHEN - NIGHT', 108, 720), item('1', 540, 720),
+      item('Rain hammers the window. MAYA (30s) stirs a pot she', 108, 696),
+      item('isn\'t watching.', 108, 684),
+      item('MAYA', 266, 660),
+      item('(not looking up)', 223, 648),
+      item('You\'re late. Again. I kept the soup', 180, 636),
+      item('warm for an hour.', 180, 624),
+      item('(MORE)', 266, 612),
+      item('1.', 540, 756),
+    ];
+    const page2 = [
+      item('2.', 540, 756),
+      item('MAYA (CONT\'D)', 266, 720),
+      item('Then I stopped.', 180, 708),
+      item('CUT TO:', 482, 684),
+      item('2', 72, 660), item('EXT. ROOFTOP - CONTINUOUS', 108, 660), item('2', 540, 660),
+      item('Empty. A single chair faces the city, long enough to fill the', 108, 636),
+      item('whole line from margin to margin.', 108, 624),
+    ];
+    const r = fromParagraphs(pdfTextToParagraphs([{ height: 792, items: page1 }, { height: 792, items: page2 }]));
+    expect(shape(r.elements)).toEqual([
+      ['scene', 'INT. KITCHEN - NIGHT'],
+      ['action', "Rain hammers the window. MAYA (30s) stirs a pot she isn't watching."],
+      ['character', 'MAYA'],
+      ['parenthetical', '(not looking up)'],
+      ['dialogue', "You're late. Again. I kept the soup warm for an hour."],
+      ['character', 'MAYA'],
+      ['dialogue', 'Then I stopped.'],
+      ['transition', 'CUT TO:'],
+      ['scene', 'EXT. ROOFTOP - CONTINUOUS'],
+      ['action', 'Empty. A single chair faces the city, long enough to fill the whole line from margin to margin.'],
+    ]);
+  });
+
+  it('reads Korean PDFs with numbered headings and name⇥dialogue columns', () => {
+    const item = (text: string, x: number, y: number) => ({ text, x, y, w: text.length * 10, size: 10 });
+    const page = (n: number) => ({
+      height: 842,
+      items: [
+        item('<그녀가 살아야 할 이유>', 250, 800), // 쪽마다 반복되는 머리말
+        item(`${n}. 강남 도로 ${n} (낮)`, 85, 740),
+        item(`경쾌한 엔진 소리 ${n}. 벤츠 한 대가 강남 도로를 미끄러지듯 달려 나간다. 차들 사이를`, 150, 716),
+        item('지훈', 85, 692), item(`(통화) 네. 도착 ${n}분 전입니다.`, 150, 692),
+        item(`차 상태는 제가 ${n}번 확인했고요.`, 150, 680),
+        item('수정', 85, 656), item('고마워.', 150, 656),
+        item('CUT TO:', 400, 600 - n * 20), // 쪽마다 자리가 다른 본문은 지우지 않는다
+      ],
+    });
+    const r = fromParagraphs(pdfTextToParagraphs([page(1), page(2), page(3)]));
+    expect(r.elements.filter((e) => e.type === 'scene').map((e) => e.text)).toEqual(['강남 도로 1 (낮)', '강남 도로 2 (낮)', '강남 도로 3 (낮)']);
+    expect(shape(r.elements.slice(1, 8))).toEqual([
+      ['action', '경쾌한 엔진 소리 1. 벤츠 한 대가 강남 도로를 미끄러지듯 달려 나간다. 차들 사이를'],
+      ['character', '지훈'],
+      ['parenthetical', '(통화)'],
+      ['dialogue', '네. 도착 1분 전입니다.\n차 상태는 제가 1번 확인했고요.'],
+      ['character', '수정'],
+      ['dialogue', '고마워.'],
+      ['transition', 'CUT TO:'],
+    ]);
+    expect(r.elements.some((e) => e.text.includes('그녀가 살아야 할 이유'))).toBe(false);
+  });
+
   it('detects the file kind', () => {
     expect(importKind('a.HWP', new Uint8Array())).toBe('hwp');
     expect(importKind('a.hwpx', new Uint8Array())).toBe('hwpx');
